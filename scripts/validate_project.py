@@ -414,7 +414,7 @@ def validate_package_and_docs() -> None:
 
     preferences_info = read_plist("prefs/Info.plist")
     preferences_makefile = read_text("prefs/Makefile")
-    if "VirtualCamPro_BUNDLE_RESOURCE_FILES = Info.plist" not in preferences_makefile:
+    if "VirtualCamPro_RESOURCE_FILES = Info.plist" not in preferences_makefile:
         fail("preference bundle must explicitly package its Info.plist")
     if package_version:
         if preferences_info.get("CFBundleShortVersionString") != package_version or \
