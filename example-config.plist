@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>enabled</key>
+    <true/>
+    <key>compatibilityMode</key>
+    <false/>
+    <key>streamURL</key>
+    <string>http://192.168.1.10:8888/live.mjpg</string>
+    <key>preferredFPS</key>
+    <integer>60</integer>
+    <key>sourceRotation</key>
+    <integer>0</integer>
+    <key>mirrorSource</key>
+    <false/>
+    <key>maximumPixelDimension</key>
+    <integer>1920</integer>
+    <key>jpegQuality</key>
+    <real>1.0</real>
+    <key>aspectFill</key>
+    <true/>
+    <key>holdLastFrame</key>
+    <true/>
+    <key>staleFrameTimeout</key>
+    <real>8.0</real>
+</dict>
+</plist>

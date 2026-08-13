@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <dict>
+        <key>Bundles</key>
+        <array>
+            <string>com.apple.UIKit</string>
+            <string>com.apple.UIKitCore</string>
+            <string>com.apple.WebKit.WebContent</string>
+        </array>
+        <key>Classes</key>
+        <array>
+            <string>AVCaptureVideoDataOutput</string>
+            <string>AVCaptureVideoPreviewLayer</string>
+            <string>AVCapturePhoto</string>
+        </array>
+    </dict>
+</dict>
+</plist>

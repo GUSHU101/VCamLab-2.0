@@ -1,0 +1,13 @@
+#!/bin/sh
+
+case "${1:-}" in
+    remove|purge)
+        if command -v killall >/dev/null 2>&1; then
+            killall mediaserverd 2>/dev/null || true
+            killall Camera 2>/dev/null || true
+            killall Preferences 2>/dev/null || true
+        fi
+        ;;
+esac
+
+exit 0

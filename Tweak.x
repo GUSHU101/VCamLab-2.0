@@ -1,0 +1,734 @@
+#import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
+#import <CoreImage/CoreImage.h>
+#import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
+#import <ImageIO/ImageIO.h>
+#import <QuartzCore/QuartzCore.h>
+#import <notify.h>
+#import <objc/runtime.h>
+
+#import "VCFrameConverter.h"
+#import "VCStreamCoordinator.h"
+
+static char VCOutputProxyAssociationKey;
+static char VCPreviewOverlayAssociationKey;
+static char VCPreviewTargetAssociationKey;
+static char VCPreviewDisplayLinkAssociationKey;
+static char VCPhotoPixelBufferAssociationKey;
+static char VCPhotoPreviewPixelBufferAssociationKey;
+static char VCPhotoSourceSnapshotAssociationKey;
+static char VCPhotoReplacementModeAssociationKey;
+static char VCPhotoFileDataAssociationKey;
+static dispatch_once_t VCPhotoJPEGFallbackLogToken;
+static dispatch_once_t VCPhotoMetadataFailureLogToken;
+static const char *VCSystemStreamStatusNotificationName =
+    "com.murkaska.virtualcampro/stream.status";
+typedef NS_ENUM(uint64_t, VCSystemStreamStatus) {
+    VCSystemStreamStatusReceiving = 2,
+    VCSystemStreamStatusHoldingLastFrame = 4,
+};
+
+static BOOL VCSystemPipelineIsReceivingReplacement(void) {
+    static int statusToken = -1;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (notify_register_check(VCSystemStreamStatusNotificationName,
+                                  &statusToken) != NOTIFY_STATUS_OK) {
+            statusToken = -1;
+        }
+    });
+    if (statusToken < 0) return NO;
+    uint64_t status = 0;
+    return notify_get_state(statusToken, &status) == NOTIFY_STATUS_OK &&
+        (status == VCSystemStreamStatusReceiving ||
+         status == VCSystemStreamStatusHoldingLastFrame);
+}
+
+static CIContext *VCSharedCIContext(void) {
+    static CIContext *context;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        context = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
+    });
+    return context;
+}
+
+static CMSampleBufferRef VCCopyCurrentReplacement(CMSampleBufferRef original) CF_RETURNS_RETAINED {
+    VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
+    BOOL aspectFill = YES;
+    NSInteger preferredFPS = 60;
+    CVPixelBufferRef source = [coordinator copyLatestPixelBufferWithAspectFill:&aspectFill
+                                                                 preferredFPS:&preferredFPS];
+    if (!source) {
+        [coordinator publishCompatibilityOutputPixelBuffer:NULL];
+        return NULL;
+    }
+    CMSampleBufferRef replacement = VCCopyReplacementSampleBuffer(original,
+                                                                   source,
+                                                                   aspectFill,
+                                                                   preferredFPS);
+    CVPixelBufferRelease(source);
+    // Publish the exact converted application buffer. BGRA conversion is deferred
+    // until a preview layer actually renders, avoiding one extra GPU pass per frame
+    // in recording/processing clients that do not show a preview.
+    [coordinator publishCompatibilityOutputPixelBuffer:
+        replacement ? CMSampleBufferGetImageBuffer(replacement) : NULL];
+    return replacement;
+}
+
+#pragma mark - AVCaptureVideoDataOutput compatibility path
+
+@interface VCVideoDataOutputProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+@property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> originalDelegate;
+@end
+
+
+@implementation VCVideoDataOutputProxy
+
+- (BOOL)respondsToSelector:(SEL)selector {
+    return [super respondsToSelector:selector] || [self.originalDelegate respondsToSelector:selector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)selector {
+    if ([self.originalDelegate respondsToSelector:selector]) return self.originalDelegate;
+    return [super forwardingTargetForSelector:selector];
+}
+
+- (void)captureOutput:(AVCaptureOutput *)output
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection {
+    id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
+    if (![delegate respondsToSelector:_cmd]) return;
+
+    CMSampleBufferRef replacement = VCCopyCurrentReplacement(sampleBuffer);
+    [delegate captureOutput:output
+      didOutputSampleBuffer:replacement ?: sampleBuffer
+             fromConnection:connection];
+    if (replacement) CFRelease(replacement);
+}
+
+- (void)captureOutput:(AVCaptureOutput *)output
+didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection {
+    id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
+    if ([delegate respondsToSelector:_cmd]) {
+        [delegate captureOutput:output didDropSampleBuffer:sampleBuffer fromConnection:connection];
+    }
+}
+
+@end
+
+
+%hook AVCaptureVideoDataOutput
+
+- (void)setSampleBufferDelegate:(id<AVCaptureVideoDataOutputSampleBufferDelegate>)delegate
+                          queue:(dispatch_queue_t)queue {
+    if (!delegate) {
+        objc_setAssociatedObject(self, &VCOutputProxyAssociationKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        %orig(nil, queue);
+        return;
+    }
+
+    if ([delegate isKindOfClass:[VCVideoDataOutputProxy class]]) {
+        %orig(delegate, queue);
+        return;
+    }
+
+    VCVideoDataOutputProxy *proxy = [VCVideoDataOutputProxy new];
+    proxy.originalDelegate = delegate;
+    objc_setAssociatedObject(self,
+                             &VCOutputProxyAssociationKey,
+                             proxy,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(proxy, queue);
+}
+
+- (id<AVCaptureVideoDataOutputSampleBufferDelegate>)sampleBufferDelegate {
+    id actualDelegate = %orig;
+    if ([actualDelegate isKindOfClass:[VCVideoDataOutputProxy class]]) {
+        return [(VCVideoDataOutputProxy *)actualDelegate originalDelegate];
+    }
+    return actualDelegate;
+}
+
+%end
+
+#pragma mark - AVCaptureVideoPreviewLayer compatibility path
+
+@interface VCPreviewDisplayTarget : NSObject
+@property (nonatomic, weak) AVCaptureVideoPreviewLayer *previewLayer;
+@property (nonatomic, strong, nullable) id displayedSurface;
+- (void)displayLinkDidFire:(CADisplayLink *)displayLink;
+@end
+
+
+@implementation VCPreviewDisplayTarget
+
+- (void)displayLinkDidFire:(CADisplayLink *)displayLink {
+    AVCaptureVideoPreviewLayer *previewLayer = self.previewLayer;
+    if (!previewLayer) {
+        [displayLink invalidate];
+        return;
+    }
+
+    CALayer *overlay = objc_getAssociatedObject(previewLayer, &VCPreviewOverlayAssociationKey);
+    if (!overlay) return;
+
+    VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
+    BOOL aspectFill = YES;
+    NSInteger preferredFPS = 60;
+    BOOL outputPathActive = NO;
+    CVPixelBufferRef pixelBuffer =
+        [coordinator copyLatestCompatibilityOutputPixelBufferWithActivePath:&outputPathActive];
+    if (outputPathActive && pixelBuffer) {
+        CVPixelBufferRef displayBuffer = VCCopyDisplayPixelBuffer(pixelBuffer);
+        CVPixelBufferRelease(pixelBuffer);
+        pixelBuffer = displayBuffer;
+    }
+    if (!outputPathActive) {
+        pixelBuffer = [coordinator copyLatestPixelBufferWithAspectFill:&aspectFill
+                                                          preferredFPS:&preferredFPS];
+    } else {
+        preferredFPS = coordinator.preferredFPS;
+    }
+    NSInteger maximumDisplayFPS = MAX(1, UIScreen.mainScreen.maximumFramesPerSecond);
+    NSInteger displayFPS = pixelBuffer ? MIN(preferredFPS, maximumDisplayFPS) : 1;
+    if (displayLink.preferredFramesPerSecond != displayFPS) {
+        displayLink.preferredFramesPerSecond = displayFPS;
+    }
+    BOOL shouldDisplay = pixelBuffer != NULL;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if (!CGRectEqualToRect(overlay.frame, previewLayer.bounds)) overlay.frame = previewLayer.bounds;
+    // When the application consumes video data, display that exact converted
+    // frame with its complete bounds. This makes preview, recording input, and
+    // downstream processing WYSIWYG instead of applying a second crop.
+    overlay.contentsGravity = outputPathActive
+        ? kCAGravityResizeAspect
+        : (aspectFill ? kCAGravityResizeAspectFill : kCAGravityResizeAspect);
+    if (shouldDisplay) {
+        IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixelBuffer);
+        id surfaceObject = surface ? (__bridge id)surface : nil;
+        if (self.displayedSurface != surfaceObject) {
+            self.displayedSurface = surfaceObject;
+            overlay.contents = surfaceObject;
+        }
+        overlay.hidden = surface == NULL;
+    } else {
+        self.displayedSurface = nil;
+        overlay.contents = nil;
+        overlay.hidden = YES;
+    }
+    [CATransaction commit];
+    if (pixelBuffer) CVPixelBufferRelease(pixelBuffer);
+}
+
+@end
+
+
+%hook AVCaptureVideoPreviewLayer
+
+- (void)layoutSublayers {
+    %orig;
+
+    CALayer *overlay = objc_getAssociatedObject(self, &VCPreviewOverlayAssociationKey);
+    if (overlay) {
+        overlay.frame = self.bounds;
+        return;
+    }
+
+    overlay = [CALayer layer];
+    overlay.frame = self.bounds;
+    overlay.zPosition = CGFLOAT_MAX;
+    overlay.masksToBounds = YES;
+    overlay.hidden = YES;
+    [self addSublayer:overlay];
+    objc_setAssociatedObject(self,
+                             &VCPreviewOverlayAssociationKey,
+                             overlay,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    VCPreviewDisplayTarget *target = [VCPreviewDisplayTarget new];
+    target.previewLayer = self;
+    CADisplayLink *displayLink = [CADisplayLink displayLinkWithTarget:target
+                                                             selector:@selector(displayLinkDidFire:)];
+    VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
+    displayLink.preferredFramesPerSecond = coordinator.isReplacementActive
+        ? MIN(coordinator.preferredFPS,
+              MAX(1, UIScreen.mainScreen.maximumFramesPerSecond))
+        : 1;
+    [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    objc_setAssociatedObject(self,
+                             &VCPreviewTargetAssociationKey,
+                             target,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(self,
+                             &VCPreviewDisplayLinkAssociationKey,
+                             displayLink,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+%end
+
+#pragma mark - AVCapturePhoto compatibility path
+
+@interface VCPixelBufferBox : NSObject {
+    CVPixelBufferRef _pixelBuffer;
+}
+- (instancetype)initWithPixelBuffer:(CVPixelBufferRef)pixelBuffer;
+@property (nonatomic, readonly) CVPixelBufferRef pixelBuffer;
+@end
+
+
+@implementation VCPixelBufferBox
+- (instancetype)initWithPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    self = [super init];
+    if (self) _pixelBuffer = pixelBuffer ? CVPixelBufferRetain(pixelBuffer) : NULL;
+    return self;
+}
+- (CVPixelBufferRef)pixelBuffer { return _pixelBuffer; }
+- (void)dealloc { if (_pixelBuffer) CVPixelBufferRelease(_pixelBuffer); }
+@end
+
+@interface VCPhotoSourceSnapshot : NSObject {
+    CVPixelBufferRef _pixelBuffer;
+}
+- (instancetype)initWithPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                          aspectFill:(BOOL)aspectFill
+                         jpegQuality:(CGFloat)jpegQuality;
+@property (nonatomic, readonly) CVPixelBufferRef pixelBuffer;
+@property (nonatomic, readonly) BOOL aspectFill;
+@property (nonatomic, readonly) CGFloat jpegQuality;
+@end
+
+@implementation VCPhotoSourceSnapshot
+- (instancetype)initWithPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                          aspectFill:(BOOL)aspectFill
+                         jpegQuality:(CGFloat)jpegQuality {
+    self = [super init];
+    if (self) {
+        _pixelBuffer = pixelBuffer ? CVPixelBufferRetain(pixelBuffer) : NULL;
+        _aspectFill = aspectFill;
+        _jpegQuality = jpegQuality;
+    }
+    return self;
+}
+- (CVPixelBufferRef)pixelBuffer { return _pixelBuffer; }
+- (void)dealloc { if (_pixelBuffer) CVPixelBufferRelease(_pixelBuffer); }
+@end
+
+static VCPhotoSourceSnapshot *VCPhotoSnapshotLocked(AVCapturePhoto *photo) {
+    VCPhotoSourceSnapshot *snapshot =
+        objc_getAssociatedObject(photo, &VCPhotoSourceSnapshotAssociationKey);
+    if (snapshot) return snapshot;
+
+    VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
+    BOOL aspectFill = YES;
+    CVPixelBufferRef source = [coordinator copyLatestPixelBufferWithAspectFill:&aspectFill
+                                                                  preferredFPS:NULL];
+    if (!source) return nil;
+    snapshot = [[VCPhotoSourceSnapshot alloc] initWithPixelBuffer:source
+                                                       aspectFill:aspectFill
+                                                      jpegQuality:coordinator.jpegQuality];
+    CVPixelBufferRelease(source);
+    objc_setAssociatedObject(photo,
+                             &VCPhotoSourceSnapshotAssociationKey,
+                             snapshot,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return snapshot;
+}
+
+typedef NS_ENUM(NSInteger, VCPhotoReplacementMode) {
+    VCPhotoReplacementModeOriginal = 0,
+    VCPhotoReplacementModeCompatibility = 1,
+    VCPhotoReplacementModeSystem = 2,
+};
+
+static VCPhotoReplacementMode VCReplacementModeForPhoto(AVCapturePhoto *photo) {
+    @synchronized (photo) {
+        NSNumber *cachedMode =
+            objc_getAssociatedObject(photo, &VCPhotoReplacementModeAssociationKey);
+        if (cachedMode) return (VCPhotoReplacementMode)cachedMode.integerValue;
+
+        VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
+        VCPhotoReplacementMode mode = VCPhotoReplacementModeOriginal;
+        if (coordinator.isReplacementActive) {
+            mode = VCPhotoSnapshotLocked(photo).pixelBuffer
+                ? VCPhotoReplacementModeCompatibility
+                : VCPhotoReplacementModeOriginal;
+        } else if (coordinator.isSystemPipelineReplacementConfigured &&
+                   VCSystemPipelineIsReceivingReplacement()) {
+            mode = VCPhotoReplacementModeSystem;
+        }
+        objc_setAssociatedObject(photo,
+                                 &VCPhotoReplacementModeAssociationKey,
+                                 @(mode),
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return mode;
+    }
+}
+
+static BOOL VCPhotoHasCompatibilityReplacement(AVCapturePhoto *photo) {
+    return VCReplacementModeForPhoto(photo) == VCPhotoReplacementModeCompatibility;
+}
+
+static BOOL VCPhotoUsesReplacement(AVCapturePhoto *photo) {
+    return VCReplacementModeForPhoto(photo) != VCPhotoReplacementModeOriginal;
+}
+
+
+static CVPixelBufferRef VCPhotoReplacementPixelBuffer(AVCapturePhoto *photo,
+                                                       CVPixelBufferRef templateBuffer,
+                                                       const void *associationKey) {
+    if (!VCPhotoHasCompatibilityReplacement(photo)) return NULL;
+    @synchronized (photo) {
+        VCPixelBufferBox *existingBox = objc_getAssociatedObject(photo, associationKey);
+        if (existingBox.pixelBuffer) {
+            BOOL matchesTemplate = !templateBuffer ||
+                (CVPixelBufferGetWidth(existingBox.pixelBuffer) == CVPixelBufferGetWidth(templateBuffer) &&
+                 CVPixelBufferGetHeight(existingBox.pixelBuffer) == CVPixelBufferGetHeight(templateBuffer) &&
+                 CVPixelBufferGetPixelFormatType(existingBox.pixelBuffer) ==
+                     CVPixelBufferGetPixelFormatType(templateBuffer));
+            if (matchesTemplate) return existingBox.pixelBuffer;
+        }
+
+        VCPhotoSourceSnapshot *snapshot = VCPhotoSnapshotLocked(photo);
+        if (!snapshot.pixelBuffer) return NULL;
+        CVPixelBufferRef replacement = templateBuffer
+            ? VCCopyPixelBufferMatchingTemplate(snapshot.pixelBuffer,
+                                                templateBuffer,
+                                                snapshot.aspectFill)
+            : CVPixelBufferRetain(snapshot.pixelBuffer);
+        if (!replacement) return NULL;
+
+        VCPixelBufferBox *box = [[VCPixelBufferBox alloc] initWithPixelBuffer:replacement];
+        CVPixelBufferRelease(replacement);
+        objc_setAssociatedObject(photo,
+                                 associationKey,
+                                 box,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        return box.pixelBuffer;
+    }
+}
+
+static CGImageRef VCCreatePhotoCGImage(CVPixelBufferRef pixelBuffer) CF_RETURNS_RETAINED {
+    if (!pixelBuffer) return NULL;
+    CIImage *image = [CIImage imageWithCVPixelBuffer:pixelBuffer];
+    if (!image || CGRectIsEmpty(image.extent)) return NULL;
+    return [VCSharedCIContext() createCGImage:image fromRect:image.extent];
+}
+
+static NSDictionary *VCPhotoPropertiesForReplacement(CGImageSourceRef source,
+                                                       size_t index,
+                                                       CGImageRef replacementImage) {
+    NSDictionary *sourceProperties = CFBridgingRelease(
+        CGImageSourceCopyPropertiesAtIndex(source, index, NULL));
+    NSMutableDictionary *properties = sourceProperties
+        ? [sourceProperties mutableCopy]
+        : [NSMutableDictionary dictionary];
+    NSNumber *width = @(CGImageGetWidth(replacementImage));
+    NSNumber *height = @(CGImageGetHeight(replacementImage));
+    properties[(id)kCGImagePropertyPixelWidth] = width;
+    properties[(id)kCGImagePropertyPixelHeight] = height;
+
+    NSDictionary *sourceExif = properties[(id)kCGImagePropertyExifDictionary];
+    if (sourceExif) {
+        NSMutableDictionary *exif = [sourceExif mutableCopy];
+        exif[(id)kCGImagePropertyExifPixelXDimension] = width;
+        exif[(id)kCGImagePropertyExifPixelYDimension] = height;
+        properties[(id)kCGImagePropertyExifDictionary] = exif;
+    }
+    return properties;
+}
+
+static BOOL VCPhotoDataPreservesAuthenticMetadata(NSData *candidateData,
+                                                   NSDictionary *sourceProperties,
+                                                   size_t expectedWidth,
+                                                   size_t expectedHeight) {
+    if (!candidateData || !sourceProperties) return NO;
+    CGImageSourceRef candidateSource = CGImageSourceCreateWithData(
+        (__bridge CFDataRef)candidateData,
+        NULL);
+    if (!candidateSource || CGImageSourceGetCount(candidateSource) == 0) {
+        if (candidateSource) CFRelease(candidateSource);
+        return NO;
+    }
+    NSDictionary *candidateProperties = CFBridgingRelease(
+        CGImageSourceCopyPropertiesAtIndex(candidateSource, 0, NULL));
+    CFRelease(candidateSource);
+    if (!candidateProperties) return NO;
+    NSNumber *candidateWidth = candidateProperties[(id)kCGImagePropertyPixelWidth];
+    NSNumber *candidateHeight = candidateProperties[(id)kCGImagePropertyPixelHeight];
+    if (candidateWidth.unsignedLongLongValue != expectedWidth ||
+        candidateHeight.unsignedLongLongValue != expectedHeight) {
+        return NO;
+    }
+
+    NSArray<NSArray *> *metadataPaths = @[
+        @[(id)kCGImagePropertyTIFFDictionary, (id)kCGImagePropertyTIFFMake],
+        @[(id)kCGImagePropertyTIFFDictionary, (id)kCGImagePropertyTIFFModel],
+        @[(id)kCGImagePropertyTIFFDictionary, (id)kCGImagePropertyTIFFSoftware],
+        @[(id)kCGImagePropertyExifDictionary, (id)kCGImagePropertyExifDateTimeOriginal],
+        @[(id)kCGImagePropertyExifDictionary, (id)kCGImagePropertyExifLensMake],
+        @[(id)kCGImagePropertyExifDictionary, (id)kCGImagePropertyExifLensModel],
+    ];
+    BOOL foundAuthenticDeviceIdentity = NO;
+    for (NSArray *path in metadataPaths) {
+        id dictionaryKey = path[0];
+        id valueKey = path[1];
+        NSDictionary *sourceDictionary = sourceProperties[dictionaryKey];
+        NSDictionary *candidateDictionary = candidateProperties[dictionaryKey];
+        id sourceValue = [sourceDictionary isKindOfClass:NSDictionary.class]
+            ? sourceDictionary[valueKey]
+            : nil;
+        if (!sourceValue) continue;
+        if ([dictionaryKey isEqual:(id)kCGImagePropertyTIFFDictionary] &&
+            ([valueKey isEqual:(id)kCGImagePropertyTIFFMake] ||
+             [valueKey isEqual:(id)kCGImagePropertyTIFFModel])) {
+            foundAuthenticDeviceIdentity = YES;
+        }
+        id candidateValue = [candidateDictionary isKindOfClass:NSDictionary.class]
+            ? candidateDictionary[valueKey]
+            : nil;
+        if (!candidateValue || ![candidateValue isEqual:sourceValue]) return NO;
+    }
+
+    NSDictionary *sourceMakerApple = sourceProperties[(id)kCGImagePropertyMakerAppleDictionary];
+    if (sourceMakerApple.count > 0) {
+        foundAuthenticDeviceIdentity = YES;
+        NSDictionary *candidateMakerApple =
+            candidateProperties[(id)kCGImagePropertyMakerAppleDictionary];
+        if (![candidateMakerApple isEqualToDictionary:sourceMakerApple]) return NO;
+    }
+    NSDictionary *sourceGPS = sourceProperties[(id)kCGImagePropertyGPSDictionary];
+    if (sourceGPS.count > 0) {
+        NSDictionary *candidateGPS = candidateProperties[(id)kCGImagePropertyGPSDictionary];
+        if (![candidateGPS isEqualToDictionary:sourceGPS]) return NO;
+    }
+    id sourceOrientation = sourceProperties[(id)kCGImagePropertyOrientation];
+    id candidateOrientation = candidateProperties[(id)kCGImagePropertyOrientation];
+    if (sourceOrientation && ![candidateOrientation isEqual:sourceOrientation]) return NO;
+    return foundAuthenticDeviceIdentity;
+}
+
+static NSData *VCPhotoDataByReplacingPrimaryImage(NSData *originalData,
+                                                   CGImageRef replacementImage,
+                                                   CGFloat jpegQuality) {
+    if (!originalData || !replacementImage) return nil;
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)originalData, NULL);
+    if (!source) return nil;
+
+    CFStringRef sourceType = CGImageSourceGetType(source);
+    size_t sourceImageCount = CGImageSourceGetCount(source);
+    if (!sourceType || sourceImageCount == 0) {
+        CFRelease(source);
+        return nil;
+    }
+    NSDictionary *sourceProperties = CFBridgingRelease(
+        CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
+    if (!sourceProperties) {
+        CFRelease(source);
+        return nil;
+    }
+
+    NSMutableData *resultData = [NSMutableData data];
+    CGImageDestinationRef destination = CGImageDestinationCreateWithData(
+        (__bridge CFMutableDataRef)resultData,
+        sourceType,
+        1,
+        NULL);
+    if (destination) {
+        NSDictionary *primaryProperties = VCPhotoPropertiesForReplacement(source,
+                                                                            0,
+                                                                            replacementImage);
+        CGImageDestinationAddImage(destination,
+                                   replacementImage,
+                                   (__bridge CFDictionaryRef)primaryProperties);
+
+        // Depth, disparity, semantic mattes, gain maps, and secondary images describe
+        // the original physical scene. Reattaching them to a network replacement would
+        // create internally contradictory (and potentially privacy-leaking) photo data.
+        // Keep the real device/EXIF/GPS identity, but emit only the verified replacement.
+        BOOL finalized = CGImageDestinationFinalize(destination);
+        CFRelease(destination);
+        if (finalized) {
+            NSData *candidateData = [resultData copy];
+            if (VCPhotoDataPreservesAuthenticMetadata(candidateData,
+                                                       sourceProperties,
+                                                       CGImageGetWidth(replacementImage),
+                                                       CGImageGetHeight(replacementImage))) {
+                CFRelease(source);
+                return candidateData;
+            }
+        }
+    }
+
+    // Some source containers cannot be rewritten after replacing their primary image.
+    // Preserve all portable camera/EXIF/GPS/TIFF properties in a standards-compliant
+    // JPEG. A replacement is accepted only after its authentic device metadata
+    // has been read back and verified against the real camera capture.
+    NSMutableData *jpegData = [NSMutableData data];
+    CGImageDestinationRef jpegDestination = CGImageDestinationCreateWithData(
+        (__bridge CFMutableDataRef)jpegData,
+        CFSTR("public.jpeg"),
+        1,
+        NULL);
+    BOOL jpegFinalized = NO;
+    if (jpegDestination) {
+        NSMutableDictionary *jpegProperties = [VCPhotoPropertiesForReplacement(source,
+                                                                                 0,
+                                                                                 replacementImage)
+            mutableCopy];
+        CGFloat clampedQuality = MIN(MAX(jpegQuality, 0.0), 1.0);
+        jpegProperties[(id)kCGImageDestinationLossyCompressionQuality] = @(clampedQuality);
+        CGImageDestinationAddImage(jpegDestination,
+                                   replacementImage,
+                                   (__bridge CFDictionaryRef)jpegProperties);
+        jpegFinalized = CGImageDestinationFinalize(jpegDestination);
+        CFRelease(jpegDestination);
+    }
+    CFRelease(source);
+    NSData *verifiedJPEGData = jpegFinalized ? [jpegData copy] : nil;
+    if (verifiedJPEGData &&
+        VCPhotoDataPreservesAuthenticMetadata(verifiedJPEGData,
+                                               sourceProperties,
+                                               CGImageGetWidth(replacementImage),
+                                               CGImageGetHeight(replacementImage))) {
+        dispatch_once(&VCPhotoJPEGFallbackLogToken, ^{
+            NSLog(@"[VirtualCamPro] Original photo container could not be rewritten; "
+                   @"used metadata-preserving JPEG fallback");
+        });
+        return verifiedJPEGData;
+    }
+    return nil;
+}
+
+
+%hook AVCapturePhoto
+
+- (AVDepthData *)depthData {
+    if (VCPhotoUsesReplacement(self)) return nil;
+    return %orig;
+}
+
+- (AVPortraitEffectsMatte *)portraitEffectsMatte {
+    if (VCPhotoUsesReplacement(self)) return nil;
+    return %orig;
+}
+
+- (AVSemanticSegmentationMatte *)semanticSegmentationMatteForType:
+    (AVSemanticSegmentationMatteType)semanticSegmentationMatteType {
+    if (VCPhotoUsesReplacement(self)) return nil;
+    return %orig(semanticSegmentationMatteType);
+}
+
+- (CVPixelBufferRef)pixelBuffer {
+    CVPixelBufferRef original = %orig;
+    CVPixelBufferRef replacement = VCPhotoReplacementPixelBuffer(self,
+                                                                  original,
+                                                                  &VCPhotoPixelBufferAssociationKey);
+    return replacement ?: original;
+}
+
+- (CVPixelBufferRef)previewPixelBuffer {
+    CVPixelBufferRef original = %orig;
+    CVPixelBufferRef replacement = VCPhotoReplacementPixelBuffer(self,
+                                                                  original,
+                                                                  &VCPhotoPreviewPixelBufferAssociationKey);
+    return replacement ?: original;
+}
+
+- (CGImageRef)CGImageRepresentation {
+    if (!VCPhotoHasCompatibilityReplacement(self)) return %orig;
+    CVPixelBufferRef pixelBuffer = self.pixelBuffer;
+    if (!pixelBuffer) return %orig;
+
+    CGImageRef cgImage = VCCreatePhotoCGImage(pixelBuffer);
+    if (!cgImage) return %orig;
+    return cgImage;
+}
+
+- (CGImageRef)previewCGImageRepresentation {
+    if (!VCPhotoHasCompatibilityReplacement(self)) return %orig;
+    CVPixelBufferRef pixelBuffer = self.previewPixelBuffer;
+    if (!pixelBuffer) return %orig;
+
+    CGImageRef cgImage = VCCreatePhotoCGImage(pixelBuffer);
+    if (!cgImage) return %orig;
+    return cgImage;
+}
+
+- (NSData *)fileDataRepresentation {
+    @synchronized (self) {
+        NSData *cachedData = objc_getAssociatedObject(self, &VCPhotoFileDataAssociationKey);
+        if (cachedData) return cachedData;
+
+        if (!VCPhotoUsesReplacement(self)) return %orig;
+
+        NSData *originalData = %orig;
+        CVPixelBufferRef pixelBuffer = self.pixelBuffer;
+        if (!pixelBuffer) {
+            if (originalData) {
+                objc_setAssociatedObject(self,
+                                         &VCPhotoFileDataAssociationKey,
+                                         originalData,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            return originalData;
+        }
+
+        CGImageRef cgImage = VCCreatePhotoCGImage(pixelBuffer);
+        if (!cgImage) {
+            if (originalData) {
+                objc_setAssociatedObject(self,
+                                         &VCPhotoFileDataAssociationKey,
+                                         originalData,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            return originalData;
+        }
+        VCPhotoSourceSnapshot *snapshot =
+            objc_getAssociatedObject(self, &VCPhotoSourceSnapshotAssociationKey);
+        CGFloat jpegQuality = snapshot ? snapshot.jpegQuality
+                                       : [VCStreamCoordinator sharedCoordinator].jpegQuality;
+        NSData *photoData = VCPhotoDataByReplacingPrimaryImage(originalData,
+                                                                cgImage,
+                                                                jpegQuality);
+        if (!photoData) {
+            dispatch_once(&VCPhotoMetadataFailureLogToken, ^{
+                NSLog(@"[VirtualCamPro] Replacement photo metadata could not be verified; "
+                       @"preserving the authentic original camera file");
+            });
+        }
+        CGImageRelease(cgImage);
+        NSData *resultData = photoData ?: originalData;
+        if (resultData) {
+            objc_setAssociatedObject(self,
+                                     &VCPhotoFileDataAssociationKey,
+                                     resultData,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return resultData;
+    }
+    return nil;
+}
+
+%end
+
+
+%ctor {
+    @autoreleasepool {
+        NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
+        NSString *processName = NSProcessInfo.processInfo.processName;
+        if ([processName isEqualToString:@"mediaserverd"] ||
+            [processName isEqualToString:@"SpringBoard"] ||
+            [bundleIdentifier isEqualToString:@"com.apple.springboard"] ||
+            [bundleIdentifier isEqualToString:@"com.murkaska.virtualcampro.prefs"]) {
+            return;
+        }
+        [[VCStreamCoordinator sharedCoordinator] startMonitoring];
+        %init;
+    }
+}

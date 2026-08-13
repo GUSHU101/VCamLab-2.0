@@ -1,0 +1,11 @@
+#!/bin/sh
+
+if [ "${1:-}" = "configure" ] && command -v killall >/dev/null 2>&1; then
+    # launchd restarts mediaserverd. Closing Camera/Preferences makes the new
+    # dylibs and preference bundle visible without a full userspace reboot.
+    killall mediaserverd 2>/dev/null || true
+    killall Camera 2>/dev/null || true
+    killall Preferences 2>/dev/null || true
+fi
+
+exit 0

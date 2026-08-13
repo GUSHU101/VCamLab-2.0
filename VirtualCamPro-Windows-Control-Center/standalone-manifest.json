@@ -1,0 +1,101 @@
+﻿{
+    "schemaVersion":  1,
+    "toolName":  "VirtualCamPro Windows Control Center",
+    "toolVersion":  "2.8.0",
+    "generatedAtUtc":  "2026-08-11T15:43:56.1418666Z",
+    "sourceCommit":  "dee7ef10394dd5406de480ca2231d319091109db",
+    "sourceDirty":  true,
+    "packageIncluded":  true,
+    "files":  [
+                  {
+                      "path":  "DEPLOYMENT.md",
+                      "bytes":  6137,
+                      "sha256":  "EF4F64C4169413C5EEBDEFEBF57871E0FA6FFF3A8100342AD386C678ABBD44BC",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "install-phone.bat",
+                      "bytes":  1776,
+                      "sha256":  "59754A91ACFA7807C51C7401E826EE8982FCD5D9D242C5BE00E5090C370D930F",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "obs-vcam-config.cmd",
+                      "bytes":  2368,
+                      "sha256":  "C4CBBCF6C21387F10547168A5BFFFA284FDF8054893EA63FCE8556BB51B2AED6",
+                      "mutable":  true
+                  },
+                  {
+                      "path":  "packages\\com.murkaska.virtualcampro_2.8.0_iphoneos-arm64.deb",
+                      "bytes":  78312,
+                      "sha256":  "1E566BEA684956851FD4527B91F991F2B3DA8E4615F72639DAEFEE66F0281AAF",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "scripts\\install-ios.ps1",
+                      "bytes":  27254,
+                      "sha256":  "B4A8C7577F675F6AC3ADCF1C0C3A07E6B7FE517C6B4BC87CBDAA3C391708BEF1",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "scripts\\install-ios-gui.ps1",
+                      "bytes":  32881,
+                      "sha256":  "E8BF83E0AC559822DA63E3D91E08326FF2CAA0D5ECA87179AA3DFA9AAAE8B69D",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "scripts\\obs-websocket.ps1",
+                      "bytes":  10634,
+                      "sha256":  "1096E3B4A93913854FFF14C8C482E7E6D10FEFCB87EDA5D1F3328CDF3BA2DBC4",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "scripts\\verify-standalone.ps1",
+                      "bytes":  7512,
+                      "sha256":  "DBB58A94850394B719E8032D8D63FEDE1B058E437BD42EBC2BBBC8D5362668D9",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "scripts\\windows-vcam.ps1",
+                      "bytes":  64222,
+                      "sha256":  "9F8EBD34641F074CBB0E1E473D04F26A56390259A0852CFE3300BB0322A86F6E",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "standalone-self-test.bat",
+                      "bytes":  861,
+                      "sha256":  "E6FCF68065E2FE67A7CCC455E2245AD52173DFF0F2E9EC5E28CE1996B5B7DE00",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "start-obs-vcam.bat",
+                      "bytes":  2421,
+                      "sha256":  "864D07A5A70887B94466EC2899584B1268BC1285968D92B2E966010A3277ADB2",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "start-stream.bat",
+                      "bytes":  897,
+                      "sha256":  "9B95D9701CA55D26B5669976ADC309C2B627C163661F40340FCDF6342B57C5BD",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "VirtualCamPro-Windows控制中心.bat",
+                      "bytes":  671,
+                      "sha256":  "44631A212D8F6000D3A2B6C558C214532B6BDDAA2ED9D540E3D51A5E6ADFB206",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "WINDOWS_TOOLS.md",
+                      "bytes":  12484,
+                      "sha256":  "588E5BA7EA61C057047D65E9832A849505072DA6DFFAA42A11392DA5AF751694",
+                      "mutable":  false
+                  },
+                  {
+                      "path":  "使用说明.txt",
+                      "bytes":  1893,
+                      "sha256":  "6C3696AC336B1C1F45FE204EA8DE20331C2D36901584A8FCFADA9E4A2749DB7F",
+                      "mutable":  false
+                  }
+              ]
+}
