@@ -8,7 +8,9 @@
 #import <notify.h>
 #import <objc/runtime.h>
 
+#import "VCAudioSampleConverter.h"
 #import "VCFrameConverter.h"
+#import "VCSharedMediaBus.h"
 #import "VCStreamCoordinator.h"
 
 static char VCOutputProxyAssociationKey;
@@ -22,27 +24,8 @@ static char VCPhotoReplacementModeAssociationKey;
 static char VCPhotoFileDataAssociationKey;
 static dispatch_once_t VCPhotoJPEGFallbackLogToken;
 static dispatch_once_t VCPhotoMetadataFailureLogToken;
-static const char *VCSystemStreamStatusNotificationName =
-    "com.murkaska.virtualcampro/stream.status";
-typedef NS_ENUM(uint64_t, VCSystemStreamStatus) {
-    VCSystemStreamStatusReceiving = 2,
-    VCSystemStreamStatusHoldingLastFrame = 4,
-};
-
 static BOOL VCSystemPipelineIsReceivingReplacement(void) {
-    static int statusToken = -1;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        if (notify_register_check(VCSystemStreamStatusNotificationName,
-                                  &statusToken) != NOTIFY_STATUS_OK) {
-            statusToken = -1;
-        }
-    });
-    if (statusToken < 0) return NO;
-    uint64_t status = 0;
-    return notify_get_state(statusToken, &status) == NOTIFY_STATUS_OK &&
-        (status == VCSystemStreamStatusReceiving ||
-         status == VCSystemStreamStatusHoldingLastFrame);
+    return VCSystemPipelineIsActive(VCSharedMediaKindVideo, 1.5);
 }
 
 static CIContext *VCSharedCIContext(void) {
@@ -55,6 +38,10 @@ static CIContext *VCSharedCIContext(void) {
 }
 
 static CMSampleBufferRef VCCopyCurrentReplacement(CMSampleBufferRef original) CF_RETURNS_RETAINED {
+    // mediaserverd already replaced this stream when its heartbeat is current.
+    // Bypassing here prevents a second conversion while still providing an
+    // automatic application-level fallback on unsupported system builds.
+    if (VCSystemPipelineIsReceivingReplacement()) return NULL;
     VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
     BOOL aspectFill = YES;
     NSInteger preferredFPS = 60;
@@ -68,7 +55,7 @@ static CMSampleBufferRef VCCopyCurrentReplacement(CMSampleBufferRef original) CF
                                                                    source,
                                                                    aspectFill,
                                                                    preferredFPS);
-    CVPixelBufferRelease(source);
+    VCReleaseSharedVideoPixelBuffer(source);
     // Publish the exact converted application buffer. BGRA conversion is deferred
     // until a preview layer actually renders, avoiding one extra GPU pass per frame
     // in recording/processing clients that do not show a preview.
@@ -154,9 +141,87 @@ didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 %end
 
+#pragma mark - AVCaptureAudioDataOutput automatic fallback
+
+@interface VCAudioDataOutputProxy : NSObject <AVCaptureAudioDataOutputSampleBufferDelegate>
+@property (nonatomic, weak) id<AVCaptureAudioDataOutputSampleBufferDelegate> originalDelegate;
+@end
+
+static char VCAudioOutputProxyAssociationKey;
+
+@implementation VCAudioDataOutputProxy
+
+- (BOOL)respondsToSelector:(SEL)selector {
+    return [super respondsToSelector:selector] || [self.originalDelegate respondsToSelector:selector];
+}
+
+- (id)forwardingTargetForSelector:(SEL)selector {
+    if ([self.originalDelegate respondsToSelector:selector]) return self.originalDelegate;
+    return [super forwardingTargetForSelector:selector];
+}
+
+- (void)captureOutput:(AVCaptureOutput *)output
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection {
+    id<AVCaptureAudioDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
+    if (![delegate respondsToSelector:_cmd]) return;
+    CMSampleBufferRef replacement = NULL;
+    if (!VCSystemPipelineIsActive(VCSharedMediaKindAudio, 1.5)) {
+        replacement = VCCopyReplacementAudioSampleBuffer(sampleBuffer);
+    }
+    [delegate captureOutput:output
+      didOutputSampleBuffer:replacement ?: sampleBuffer
+             fromConnection:connection];
+    if (replacement) CFRelease(replacement);
+}
+
+- (void)captureOutput:(AVCaptureOutput *)output
+didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection {
+    id<AVCaptureAudioDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
+    if ([delegate respondsToSelector:_cmd]) {
+        [delegate captureOutput:output didDropSampleBuffer:sampleBuffer fromConnection:connection];
+    }
+}
+@end
+
+%hook AVCaptureAudioDataOutput
+
+- (void)setSampleBufferDelegate:(id<AVCaptureAudioDataOutputSampleBufferDelegate>)delegate
+                          queue:(dispatch_queue_t)queue {
+    if (!delegate) {
+        objc_setAssociatedObject(self,
+                                 &VCAudioOutputProxyAssociationKey,
+                                 nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        %orig(nil, queue);
+        return;
+    }
+    if ([delegate isKindOfClass:VCAudioDataOutputProxy.class]) {
+        %orig(delegate, queue);
+        return;
+    }
+    VCAudioDataOutputProxy *proxy = [VCAudioDataOutputProxy new];
+    proxy.originalDelegate = delegate;
+    objc_setAssociatedObject(self,
+                             &VCAudioOutputProxyAssociationKey,
+                             proxy,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    %orig(proxy, queue);
+}
+
+- (id<AVCaptureAudioDataOutputSampleBufferDelegate>)sampleBufferDelegate {
+    id actual = %orig;
+    return [actual isKindOfClass:VCAudioDataOutputProxy.class]
+        ? [(VCAudioDataOutputProxy *)actual originalDelegate] : actual;
+}
+%end
+
 #pragma mark - AVCaptureVideoPreviewLayer compatibility path
 
-@interface VCPreviewDisplayTarget : NSObject
+@interface VCPreviewDisplayTarget : NSObject {
+    CVPixelBufferRef _sharedPixelBufferLease;
+}
 @property (nonatomic, weak) AVCaptureVideoPreviewLayer *previewLayer;
 @property (nonatomic, strong, nullable) id displayedSurface;
 - (void)displayLinkDidFire:(CADisplayLink *)displayLink;
@@ -164,6 +229,12 @@ didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 
 @implementation VCPreviewDisplayTarget
+
+- (void)replaceSharedPixelBufferLease:(CVPixelBufferRef)pixelBuffer {
+    CVPixelBufferRef retired = _sharedPixelBufferLease;
+    _sharedPixelBufferLease = pixelBuffer;
+    if (retired) VCReleaseSharedVideoPixelBuffer(retired);
+}
 
 - (void)displayLinkDidFire:(CADisplayLink *)displayLink {
     AVCaptureVideoPreviewLayer *previewLayer = self.previewLayer;
@@ -174,6 +245,13 @@ didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     CALayer *overlay = objc_getAssociatedObject(previewLayer, &VCPreviewOverlayAssociationKey);
     if (!overlay) return;
+
+    if (VCSystemPipelineIsReceivingReplacement()) {
+        overlay.hidden = YES;
+        self.displayedSurface = nil;
+        [self replaceSharedPixelBufferLease:NULL];
+        return;
+    }
 
     VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
     BOOL aspectFill = YES;
@@ -222,7 +300,19 @@ didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
         overlay.hidden = YES;
     }
     [CATransaction commit];
-    if (pixelBuffer) CVPixelBufferRelease(pixelBuffer);
+    if (!outputPathActive && pixelBuffer) {
+        // CoreAnimation consumes the IOSurface asynchronously. Transfer the
+        // cross-process use-count lease to the display target and retire it
+        // only after the next surface has been committed.
+        [self replaceSharedPixelBufferLease:pixelBuffer];
+    } else {
+        [self replaceSharedPixelBufferLease:NULL];
+        if (pixelBuffer) CVPixelBufferRelease(pixelBuffer);
+    }
+}
+
+- (void)dealloc {
+    [self replaceSharedPixelBufferLease:NULL];
 }
 
 @end
@@ -329,10 +419,13 @@ static VCPhotoSourceSnapshot *VCPhotoSnapshotLocked(AVCapturePhoto *photo) {
     CVPixelBufferRef source = [coordinator copyLatestPixelBufferWithAspectFill:&aspectFill
                                                                   preferredFPS:NULL];
     if (!source) return nil;
-    snapshot = [[VCPhotoSourceSnapshot alloc] initWithPixelBuffer:source
+    CVPixelBufferRef stableSource = VCCopyStablePixelBuffer(source);
+    VCReleaseSharedVideoPixelBuffer(source);
+    if (!stableSource) return nil;
+    snapshot = [[VCPhotoSourceSnapshot alloc] initWithPixelBuffer:stableSource
                                                        aspectFill:aspectFill
                                                       jpegQuality:coordinator.jpegQuality];
-    CVPixelBufferRelease(source);
+    CVPixelBufferRelease(stableSource);
     objc_setAssociatedObject(photo,
                              &VCPhotoSourceSnapshotAssociationKey,
                              snapshot,
@@ -342,7 +435,7 @@ static VCPhotoSourceSnapshot *VCPhotoSnapshotLocked(AVCapturePhoto *photo) {
 
 typedef NS_ENUM(NSInteger, VCPhotoReplacementMode) {
     VCPhotoReplacementModeOriginal = 0,
-    VCPhotoReplacementModeCompatibility = 1,
+    VCPhotoReplacementModeApplicationFallback = 1,
     VCPhotoReplacementModeSystem = 2,
 };
 
@@ -354,13 +447,13 @@ static VCPhotoReplacementMode VCReplacementModeForPhoto(AVCapturePhoto *photo) {
 
         VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
         VCPhotoReplacementMode mode = VCPhotoReplacementModeOriginal;
-        if (coordinator.isReplacementActive) {
-            mode = VCPhotoSnapshotLocked(photo).pixelBuffer
-                ? VCPhotoReplacementModeCompatibility
-                : VCPhotoReplacementModeOriginal;
-        } else if (coordinator.isSystemPipelineReplacementConfigured &&
-                   VCSystemPipelineIsReceivingReplacement()) {
+        if (coordinator.isSystemPipelineReplacementConfigured &&
+            VCSystemPipelineIsReceivingReplacement()) {
             mode = VCPhotoReplacementModeSystem;
+        } else if (coordinator.isReplacementActive) {
+            mode = VCPhotoSnapshotLocked(photo).pixelBuffer
+                ? VCPhotoReplacementModeApplicationFallback
+                : VCPhotoReplacementModeOriginal;
         }
         objc_setAssociatedObject(photo,
                                  &VCPhotoReplacementModeAssociationKey,
@@ -371,7 +464,7 @@ static VCPhotoReplacementMode VCReplacementModeForPhoto(AVCapturePhoto *photo) {
 }
 
 static BOOL VCPhotoHasCompatibilityReplacement(AVCapturePhoto *photo) {
-    return VCReplacementModeForPhoto(photo) == VCPhotoReplacementModeCompatibility;
+    return VCReplacementModeForPhoto(photo) == VCPhotoReplacementModeApplicationFallback;
 }
 
 static BOOL VCPhotoUsesReplacement(AVCapturePhoto *photo) {
@@ -723,9 +816,14 @@ static NSData *VCPhotoDataByReplacingPrimaryImage(NSData *originalData,
         NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
         NSString *processName = NSProcessInfo.processInfo.processName;
         if ([processName isEqualToString:@"mediaserverd"] ||
-            [processName isEqualToString:@"SpringBoard"] ||
-            [bundleIdentifier isEqualToString:@"com.apple.springboard"] ||
             [bundleIdentifier isEqualToString:@"com.murkaska.virtualcampro.prefs"]) {
+            return;
+        }
+        if ([processName isEqualToString:@"SpringBoard"] ||
+            [bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+            // VCMediaServer owns the only SpringBoard producer. This binary can
+            // still be selected by a class-based Substrate filter, but must not
+            // start a second decoder or install application hooks here.
             return;
         }
         [[VCStreamCoordinator sharedCoordinator] startMonitoring];

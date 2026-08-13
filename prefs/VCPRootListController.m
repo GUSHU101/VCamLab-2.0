@@ -50,7 +50,20 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        CFPreferencesAppSynchronize(VCPreferencesDomain);
+        id sourceValue = CFBridgingRelease(
+            CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
+        NSNumber *sourceType = @([sourceValue integerValue]);
+        NSArray *allSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        NSMutableArray *visible = [NSMutableArray arrayWithCapacity:allSpecifiers.count];
+        for (PSSpecifier *specifier in allSpecifiers) {
+            NSArray *sourceTypes = [specifier propertyForKey:@"vcSourceTypes"];
+            if (![sourceTypes isKindOfClass:NSArray.class] ||
+                [sourceTypes containsObject:sourceType]) {
+                [visible addObject:specifier];
+            }
+        }
+        _specifiers = visible;
     }
     return _specifiers;
 }
@@ -66,7 +79,11 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
                                          VCPreferencesChangedNotification,
                                          NULL,
                                          NULL,
-                                         YES);
+                                          YES);
+    if ([key isEqualToString:@"sourceType"]) {
+        _specifiers = nil;
+        [self reloadSpecifiers];
+    }
 }
 
 - (void)testStreamConnection:(PSSpecifier *)specifier {
@@ -74,8 +91,8 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
     CFPreferencesAppSynchronize(VCPreferencesDomain);
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
-    id compatibilityValue = CFBridgingRelease(
-        CFPreferencesCopyAppValue(CFSTR("compatibilityMode"), VCPreferencesDomain));
+    id sourceTypeValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
     NSString *streamValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("streamURL"), VCPreferencesDomain));
     NSString *trimmedValue = [streamValue isKindOfClass:[NSString class]]
@@ -83,6 +100,11 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
             [NSCharacterSet whitespaceAndNewlineCharacterSet]]
         : @"";
     NSURL *streamURL = [NSURL URLWithString:trimmedValue];
+    if (sourceTypeValue && [sourceTypeValue integerValue] != 0) {
+        [self showStreamTestResultWithTitle:@"当前不是网络来源"
+                                   message:@"请将“替换来源”切换为网络 HLS / MJPEG 后再检测 URL。屏幕和本地媒体由 SpringBoard 本地读取，不建立网络连接。"];
+        return;
+    }
     NSString *scheme = streamURL.scheme.lowercaseString;
     if ((!([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"])) ||
         streamURL.host.length == 0 || streamURL.user.length > 0 ||
@@ -93,30 +115,29 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
         return;
     }
 
-    BOOL systemModeActive = [enabledValue boolValue] && ![compatibilityValue boolValue];
-    if (systemModeActive) {
+    if ([enabledValue boolValue]) {
         uint64_t status = VCPStreamStatusDisabled;
         VCPGetSystemStreamStatus(&status);
         switch (status) {
             case VCPStreamStatusReceiving:
                 [self showStreamTestResultWithTitle:@"网络流可用"
-                                           message:@"系统相机服务正在接收有效网络帧；无需建立第二条测试连接。"];
+                                           message:@"SpringBoard 媒体服务正在接收有效网络帧；无需建立第二条测试连接。"];
                 return;
             case VCPStreamStatusConnecting:
                 [self showStreamTestResultWithTitle:@"正在连接"
-                                           message:@"系统相机服务正在连接当前 URL。请确认 Windows 桥接已启动，稍后再检测。"];
+                                           message:@"SpringBoard 媒体服务正在连接当前 URL。请确认 Windows 桥接已启动，稍后再检测。"];
                 return;
             case VCPStreamStatusError:
                 [self showStreamTestResultWithTitle:@"连接需要恢复"
-                                           message:@"系统相机服务已检测到断流并正在自动重连。请检查 Windows 桥接、IP 与防火墙。"];
+                                           message:@"SpringBoard 媒体服务已检测到断流并正在自动重连。请检查 Windows 桥接、IP 与防火墙。"];
                 return;
             case VCPStreamStatusHoldingLastFrame:
                 [self showStreamTestResultWithTitle:@"正在保持最后一帧"
                                            message:@"网络连接正在恢复，系统相机仍输出最后收到的替换帧；请检查 Windows 桥接和网络稳定性。"];
                 return;
             default:
-                [self showStreamTestResultWithTitle:@"系统服务尚未接管"
-                                           message:@"替换已启用，但系统相机服务尚未报告状态。请重新打开相机；若仍不变，检查插件安装与 mediaserverd 日志。"];
+                [self showStreamTestResultWithTitle:@"媒体服务尚未接管"
+                                           message:@"替换已启用，但 SpringBoard 尚未报告来源状态。请确认 SpringBoard 注入成功并检查系统日志。"];
                 return;
         }
     }

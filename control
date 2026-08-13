@@ -1,12 +1,9 @@
 Package: com.murkaska.virtualcampro
 Name: VirtualCamPro
 Depends: firmware (>= 15.0), firmware (<< 16.0), mobilesubstrate, preferenceloader
-Conflicts: com.apple.avfoundation.camerasupport
-Replaces: com.apple.avfoundation.camerasupport
-Provides: com.apple.avfoundation.camerasupport
-Version: 2.8.0
+Version: 2.10.0
 Architecture: iphoneos-arm64
-Description: Network-stream camera frame replacement tweak for jailbroken iOS 15 devices
+Description: Unified system camera and microphone media replacement for jailbroken iOS 15 devices
 Maintainer: MurkAskA01
 Author: MurkAskA01
 Section: Tweaks

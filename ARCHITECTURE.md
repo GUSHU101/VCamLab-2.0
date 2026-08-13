@@ -1,93 +1,140 @@
-# 架构与对照研究
+# 统一系统管线架构
 
-## 数据路径
+## 目标
+
+本项目替换的是系统相机媒体图里的真实样本，不是预览覆盖层。主路径位于 `mediaserverd` 的 `CMCapture`/`BWGraph` 输出边界：所有可识别的颜色 `CVImageBuffer` 与线性 PCM 麦克风样本在进入照片、录像、视频通话、WebRTC、扫码等下游消费者前被替换。
+
+`BWNodeOutput -emitSampleBuffer:` 是 iOS 15 上兼顾“足够靠近系统相机源”和“仍然有稳定格式描述”的边界。继续向物理传感器/ISP 前端下移会遇到 Bayer RAW、同步脉冲、镜头标定和厂商私有元数据；把普通 BGRA/YUV 帧塞到这些入口会破坏 ISP 图，反而更容易导致 Camera、FaceTime 或 `mediaserverd` 崩溃。因此项目不会为了名义上的“更底层”盲目 Hook 原始传感器节点。
+
+| 层级 | 本项目行为 | 结果 |
+| --- | --- | --- |
+| L0 CMOS/Lens/ISP | 不修改硬件；原颜色内容在 L2 被丢弃 | 保留对焦、曝光、镜头与 ISP 稳定性 |
+| L1 驱动/Kernel/IOKit | 不写内核驱动、不伪造硬件设备 | 不改变设备树、电源与相机驱动协议 |
+| L2 Camera Service | Hook `mediaserverd` 中基类及直接覆写的 `BWNodeOutput` | 在系统扇出前替换颜色和可支持的 PCM 样本 |
+| L3 AVFoundation Capture | 保留真实 Device/Session/Input/Connection 对象 | 应用能力查询和会话状态正常，内容来自 L2 替换样本 |
+| L4 CoreMedia/CoreVideo | 重建匹配的 CMSampleBuffer/CVPixelBuffer/ASBD/timing | 下游处理的是实际替换数据，不是 UI 贴图 |
+| L5 输出分支 | 系统路径覆盖 Photo/Movie/DataOutput/Preview；标准 AVFoundation 自动回退 | 拍照、录像、通话、WebRTC、扫码尽量一致 |
+
+L0/L1 若要出现“虚拟画面”，必须开发可被 Apple 相机栈接受的内核虚拟传感器/驱动并重建 ISP 私有协议；这不属于 MobileSubstrate dylib 能安全完成的范围。当前设计的承诺是 L2–L5 真替换，L0/L1 只作为相机时钟、格式模板和硬件能力来源。
+
+## 进程与数据路径
 
 ```text
-OBS / 视频文件
-      |
-      | RTMP -> SRS/MediaMTX -> HLS，或 FFmpeg -> MJPEG
-      v
-AVAssetStreamAdapter (mediaserverd)
-      |
-      | BGRA CVPixelBuffer + IOSurface
-      v
-VCStreamCoordinator
-      |
-      | Core Image GPU：按设置旋转/镜像一次
-      | 统一方向后的最新源帧供所有输出复用
-      v
-VCFrameConverter
-      |
-      | 按网络源帧 + 目标格式缓存转换结果
-      | VTPixelTransferSession: 缩放、BGRA -> 原始 420v/420f/BGRA
-      v
-BWNodeOutput emitSampleBuffer:
-      |
-      v
-系统相机与第三方相机客户端
+                         SpringBoard（唯一生产者）
+        ┌──────────────────────┼───────────────────────┐
+        │                      │                       │
+   网络 HLS/MJPEG       CoreAnimation 屏幕       本地 MP4/MOV/MP3
+        │                      │                       │
+   上游参数原样解码       显示方向原样输出        本地限帧/缩放/旋转/镜像
+        │                      │                       │
+        └──────────> BGRA 全局 IOSurface <────────────┘
+                               │
+                         3 槽 Surface 环
+                               │ Darwin notify:
+                               │ generation + IOSurfaceID
+                               v
+             mediaserverd（零拷贝映射，同一物理页）
+                               │
+          BWNodeOutput -emitSampleBuffer: 运行时签名校验
+                 ┌─────────────┴──────────────┐
+                 │                            │
+       颜色 CVImageBuffer              线性 PCM 音频
+       匹配原宽高/格式/附件             匹配原 ASBD/样本数/PTS
+                 │                            │
+                 └─────────────┬──────────────┘
+                               v
+        Camera / Photo / Movie / FaceTime / WebRTC / 扫码
+
+        系统 Hook 无实际输出心跳 ──> 应用 AVFoundation 自动回退
 ```
 
-系统模式只在 `mediaserverd` 建立一条网络连接。应用层兼容模式则在每个相机应用内拉流，并代理 `AVCaptureVideoDataOutput`；它还为 `AVCaptureVideoPreviewLayer` 和 `AVCapturePhoto` 提供回退路径。
+SpringBoard 实例负责 `AVAssetStreamAdapter`、`VCScreenCaptureSource` 或 `VCLocalMediaSource`。`mediaserverd` 和每个应用都只运行 `VCSharedVideoClient`/`VCSharedAudioClient`，不建立网络连接、不重复解码媒体。
 
-## 为什么保留真实格式描述
+来源策略是明确隔离的：网络 MJPEG/HLS 不读取手机端的 FPS、质量、旋转、镜像和最长边设置，MJPEG 按发送端完整像素尺寸解码；屏幕来源按系统显示方向和固定刷新节奏输出；只有本地文件进入设备端解码尺寸、最高 FPS、比例、旋转和镜像处理。网络/屏幕来源不向共享音频环写数据，因此真实麦克风保持原样。
 
-CoreMedia 要求 `CMSampleBuffer` 的格式描述与像素缓冲的宽、高、像素格式和相关附件一致。项目先创建与原始相机像素缓冲完全匹配的目标缓冲，再用 `VTPixelTransferSession` 转换网络帧。如果 `CMVideoFormatDescriptionMatchesImageBuffer` 证明原格式描述与新缓冲完全匹配，则直接复用它以保留色彩、净孔径等扩展；不匹配时才从新缓冲重建描述。不能把 720p BGRA 网络帧直接配上原相机 1080p 420f 的格式描述。
+## 视频零拷贝
 
-`aspectFill=true` 使用 `kVTScalingMode_Trim`，保持比例并裁切填满；关闭时使用 `kVTScalingMode_Letterbox`。
+生产者要求所有输出缓冲带 `kCVPixelBufferIOSurfacePropertiesKey` 与 `kIOSurfaceIsGlobal`。发布时只做三件事：
 
-源方向变换发生在 `VCStreamCoordinator` 接收网络帧时，而不是发生在每个 `BWNodeOutput`。`VCCopyPixelBufferApplyingOrientation` 使用单例 `CIContext`、EXIF 方向语义和可回收 BGRA/IOSurface 池，把 0°/90°/180°/270° 与水平镜像合并为一次 GPU 渲染。旋转后的缓冲成为协调器唯一的最新源帧，因此预览、照片、录像和第三方客户端不会分别重复旋转。方向设置改变时立即清除旧帧和格式缓存；GPU 变换无法创建缓冲时保留未变换源帧，避免相机管线中断。
+1. 在 3 槽环中 retain 当前 `CVPixelBuffer`，让消费者跨帧调度时仍能 lookup。
+2. 通过 notify state 发布 32 位 generation 与 32 位 `IOSurfaceID`。
+3. 单独发布 `mach_continuous_time` 毫秒值，用于旧帧策略和进程首次连接时的真实新鲜度判断。
 
-MJPEG 解码最长边默认 1920，可选 1280、2560 和 3840。提高上限只增加源细节，不会改变真实相机输出的格式描述；最终仍由 `VTPixelTransferSession` 匹配每个目标节点的尺寸和 YUV/BGRA 格式。3840 BGRA 单帧可能超过 30 MB，因此在 A10 上标记为实验性配置。
+消费者调用 `IOSurfaceLookup`，再用 `CVPixelBufferCreateWithIOSurface` 包装同一 Surface。该步骤只创建 CoreVideo 包装对象，不复制像素。包装对象按完整的 `generation + IOSurfaceID` 控制字缓存：同一帧经过多个相机输出节点时复用同一指针，从而命中像素转换缓存；同一 Surface 槽被新 generation 复用时一定创建新包装，不能误用上一轮转换结果。控制字在 lookup 前后不一致时最多重试三次。
 
-一个解码帧可能在 `mediaserverd` 内经过多个 `BWNodeOutput`。转换器使用“源像素缓冲指针 + 目标宽高 + 目标像素格式 + 缩放模式 + 原格式描述语义”作为缓存键；指针相同或 `CFEqual` 证明扩展等价时才复用，既避免色彩/净孔径附件不同的节点混用，也避免等价描述对象地址变化造成重复转换。经验证或重建的格式描述与转换缓冲一起缓存，不在每个样本上重复构造。热路径使用固定容量 C 结构数组，不再每帧构造 `NSString` 键或访问 Foundation 字典。
+源缓冲如果没有 IOSurface 会直接丢弃并保留真实相机，而不是退化成未限制的 CPU 拷贝。HLS、MJPEG、本地视频、屏幕捕获和本地方向变换的池都显式创建全局 IOSurface。
 
-`BWNodeOutput` 在运行时还要通过 `mediaTypeIsVideo` 签名检查，样本必须存在 `CVImageBuffer`，且目标格式必须是明确支持的 YUV/BGRA/ARGB 颜色格式。深度、视差、元数据、音频和压缩输出不进入替换器。
+## 音频共享与 MP3 麦克风
 
-转换器和 MJPEG 解码器的像素池都有分配阈值。每种目标格式最多允许 6 个在途转换缓冲，兼顾相机管线扇出和 A10 内存上限。MJPEG 接收器增量解析 JPEG marker/segment/scan，跳过 APP 段内的嵌入图像，单帧限制为 24 MiB、累计接收缓冲限制为 32 MiB，并对重复损坏日志做 30 秒限频。收到 `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` 警告时清理接收状态、转换帧、像素池和 `VTPixelTransferSession`；严重压力时还释放最新网络帧，之后由新帧自动恢复。
+本地媒体只在 SpringBoard 解码为 48 kHz、双声道、交错 Float32。PCM 写入一块三秒容量的全局 IOSurface 环，头部使用 C11 release/acquire 原子计数；进程间不传输 `NSData` 或归档对象。
 
-协调器为偏好刷新、流连接和方向变换分别维护单调 generation。新的偏好快照只允许最新一次主队列任务生效；帧在方向变换前后各校验一次流与变换 generation，因此旧 URL 的回调、或正在执行旧旋转的 GPU 任务，无法在切换后的清理操作之后重新写入最新帧。
+`mediaserverd` 收到真实麦克风样本时，以它的 `AudioStreamBasicDescription`、样本数和 PTS 为模板：
 
-网络回调不会直接在 NSURLSession/HLS 主线程上执行方向渲染。协调器维护一条独立串行帧处理队列和一个受锁保护的待处理槽：GPU 正在处理时到达的新帧会替换槽中的旧帧，处理完立即取最新值。这个 latest-frame-wins 设计把积压上限固定为“一个在处理、一个待处理”，避免 A10 短时过载后继续播放越来越旧的队列。MJPEG 接收器在单次网络回调含有多张完整 JPEG 时同样只解码最后一张完整帧。
+- 支持常见 16/24/32 位有符号整数与 32/64 位浮点 LPCM；
+- 支持单声道/双声道、交错/非交错与 8–192 kHz；
+- 对源 PCM 做线性重采样，单声道使用左右平均；
+- 保留原样本附件与呈现时间戳；
+- 压缩或未知格式直接返回原麦克风样本。
 
-系统管线还通过 Darwin notify state 发布“关闭、连接中、接收中、保留最后有效帧、错误”五态。设置面板优先读取这份由 `mediaserverd` 实际接收路径产生的状态，因此检测默认单客户端 MJPEG 时不会抢占第二条连接；仅在系统管线未启用时才建立一个有 8 秒上限的直接 HTTP 数据检测。
+纯音频文件不发布视频 Surface，因此视频路径自然 fail-open 到物理摄像头，实现“MP3 走麦克风 + 本地摄像头画面”。
 
-FPS 配置范围为 1–240，60 只是 A10/常规相机模式的默认值，不是解码器硬截断。Windows 端必须先确认 OBS Virtual Camera 真实发布相同 DirectShow 模式；高于 64 FPS 时采集队列自动保持至少约半秒、编码后 FIFO 至少约一秒。兼容模式的数据输出仍遵循目标 `AVCapture` 回调的真实节拍，屏幕预览则按设备物理刷新率显示。
+## 系统媒体图替换
 
-`VCStreamCoordinator` 的最新帧、时间和缩放配置由 `os_unfair_lock` 保护。旧像素缓冲在退出临界区后才释放，避免 CoreVideo/IOSurface 析构延长多节点的等待时间。
+Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampleBuffer:` 的子类，避免专用照片/录像输出类绕过基类实现。已替换样本带一个不向下游传播的临时 attachment；如果子类原实现再调用父类，父类 Hook 看到标记后直接放行，防止重复转换。每个候选类还要检查：
 
-设备发现和相机能力 API 不做 Hook，因此应用看到的相机名称、位置、焦距能力仍是真实设备。照片只保留真实捕获产生的 TIFF/EXIF/GPS/Apple 信息，并在写出后读回核验；不构造虚假设备身份。兼容模式必须锁定网络源帧，系统模式必须收到 `mediaserverd` 的 receiving/holding 状态后才允许照片重写，插件关闭或 fail-open 时完全走原 API。原场景深度、视差、人物/语义蒙版、HDR 增益图和辅助图不会与另一张网络主图混合。
+- `BWNodeOutput` 类和 `emitSampleBuffer:` 存在；
+- 参数数量为 3，返回值为 `void`，第三个参数为指针；
+- `mediaTypeIsVideo`/`mediaTypeIsAudio` 只有在返回签名确认为 `BOOL` 时才调用；
+- 类尚未加载时由 dyld 回调触发，并最多重试 10 秒。
 
-## 对照的开源项目
+每个样本按内容再次分类：
 
-### [MurkAskA01/ios-vcam](https://github.com/MurkAskA01/ios-vcam)（原项目）
+- 存在 `CVImageBuffer`、节点声明为视频、像素格式属于明确支持的 BGRA/ARGB/双平面 YUV 时进入视频转换；
+- 存在线性 PCM ASBD 且节点声明为音频时进入音频转换；
+- 深度、视差、元数据、压缩辅助流与未知格式原样透传。
 
-原实现主要在应用进程中修改 `AVCaptureVideoDataOutput` delegate、覆盖预览层并重写 `AVCapturePhoto` getter。问题包括：全局修改 delegate 类、返回额外 retain 的照片缓冲、设置 key 不一致、宣称 RTSP 但没有 RTSP 解码、仅 arm64、伪造设备能力，以及与相机替换无关的反调试/越狱隐藏 Hook。
+视频由 `VTPixelTransferSession` 转成真实相机节点要求的宽、高、像素格式和缩放方式。只有 `CMVideoFormatDescriptionMatchesImageBuffer` 成功时才复用原描述，否则从新缓冲创建匹配描述。原样本 timing 与可传播 attachments 会复制到替换样本。
 
-### [LiuSky/iOS-vcam](https://github.com/LiuSky/iOS-vcam)
+同一源帧经过多个输出节点时，转换器按源 Surface、目标宽高、像素格式、缩放方式和格式描述语义复用结果；固定容量池限制每种格式最多 6 个在途缓冲，避免 A10 上的扇出分配失控。
 
-该仓库主要提供 Windows RTMP/HLS 服务、USB 隧道、部署工具和预编译 iOS 包，没有公开 iOS dylib 源码。对其 rootless 包进行结构检查后，可见 dylib 注入 `mediaserverd`，并引用 `CMCapture`、`CMCaptureCore`、`BWNodeOutput`、`VTPixelTransferSession`、H.264/HEVC 和 RTMP 组件。这证明低层相机图与像素转换是覆盖系统管线的关键，但二进制实现不能直接复用或审计。
+## 自动回退而不是手动模式
 
-### [donets2013/MyVcam](https://github.com/donets2013/MyVcam)
+系统 Hook 只有在替换样本成功交给原 `emitSampleBuffer:` 前才发布视频或音频心跳。应用 Hook 的规则是：
 
-该仓库公开了 `mediaserverd` 的 `BWNodeOutput -emitSampleBuffer:` Hook，以及 TCP/WebSocket H.264 + VideoToolbox 解码框架。可复用的方向是单点拉流、IOSurface 缓冲、断线重连和低层注入。其当前代码把网络像素缓冲与原相机格式描述直接组合，可能因尺寸/格式不一致失败；TCP 首次 `read` 也未保证读满固定头，Annex-B 转 AVCC 的长度字节序处理存在风险。因此本项目只采用架构思路，重新实现格式转换和生命周期管理。
+- 1.5 秒内有对应系统心跳：完全旁路，不二次转换；
+- 没有心跳但共享媒体有效：代理 `AVCaptureVideoDataOutput` 或 `AVCaptureAudioDataOutput`；
+- 预览层只在应用视频回退时使用 IOSurface contents；
+- 照片回退锁定同一源帧，保留并读回核验真实 TIFF/EXIF/GPS/Apple 元数据；
+- 任何转换、编码或元数据核验失败：调用原 API/返回原文件。
 
-### [balayan7988/VCAMBypass](https://github.com/balayan7988/VCAMBypass)
+这套协商不需要设置开关。私有系统节点在某个 iOS 小版本不存在时，目标应用只要使用标准 AVFoundation 数据输出/照片接口就会自动接管；`AVCaptureMovieFileOutput` 等无法由公开应用接口完整替代的路径仍依赖系统 Hook。
 
-该仓库是针对另一个闭源 VCAM 的授权绕过，不包含相机帧替换实现。它对本项目的功能架构没有可复用价值，也不会纳入任何授权、心跳或绕过逻辑。
+## 来源生命周期
 
-## 一手文档约束
+偏好刷新、来源切换和方向变换分别维护 generation。旧 URL、本地 reader 或正在执行的 GPU 任务在发布前重新检查 generation，不能越过一次来源切换写回旧帧。
 
-- [Theos rootless](https://theos.dev/docs/rootless) scheme 自动添加 `/var/jb` 安装前缀、rootless rpath 和 `iphoneos-arm64` 包架构。
-- [Cydia Substrate Darwin deployment](https://www.cydiasubstrate.com/inject/darwin/) 规定每个 dylib 使用独立 filter plist；系统服务用 `Executables=mediaserverd`，应用回退同时要求 UIKit bundle 与 AVFoundation 相机类，避免把带 UIKit 依赖的回退 dylib 注入系统守护进程。
-- Apple [TN3121](https://developer.apple.com/documentation/technotes/tn3121-selecting-a-pixel-format-for-an-avcapturevideodataoutput) 建议尽量保留相机的原生双平面 YUV 像素格式；BGRA 占用更高。因此 BGRA 只作为网络解码中间格式，实际输出转换回原始相机格式。
-- [`CMSampleBufferCreateReadyWithImageBuffer`](https://developer.apple.com/documentation/coremedia/cmsamplebuffercreatereadywithimagebuffer%28allocator%3Aimagebuffer%3Aformatdescription%3Asampletiming%3Asamplebufferout%3A%29) 要求格式描述与图像缓冲严格一致。
-- [`CMVideoFormatDescriptionMatchesImageBuffer`](https://developer.apple.com/documentation/coremedia/cmvideoformatdescriptionmatchesimagebuffer%28_%3Aimagebuffer%3A%29) 比较尺寸、像素格式和与图像缓冲共用的格式扩展。
-- [`VTPixelTransferSessionTransferImage`](https://developer.apple.com/documentation/videotoolbox/vtpixeltransfersessiontransferimage%28_%3Afrom%3Ato%3A%29) 用于复制、缩放和像素格式转换。
-- [`CVPixelBufferPool`](https://developer.apple.com/documentation/corevideo/cvpixelbufferpool) 提供可回收像素缓冲和分配阈值，避免系统服务内存无界增长。
-- [Responding to low-memory warnings](https://developer.apple.com/documentation/xcode/responding-to-low-memory-warnings) 明确列出了 `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` 作为非 UIKit 进程的低内存响应路径。
+帧处理采用 latest-frame-wins：一帧处理中只保留一个待处理槽，新帧覆盖旧待处理帧。网络突发或 A10 GPU 短暂繁忙不会形成延迟不断增长的队列。
 
-私有节点信息来自 [iOS 15.2.1 CMCapture 运行时头](https://www.developer.limneos.net/index.php?framework=CMCapture.framework&header=BWNodeOutput.h&ios=15.2.1) 与可公开查看的 [早期 `BWNodeOutput` 头](https://www.developer.limneos.net/index.php?framework=Celestial.framework&header=BWNodeOutput.h&ios=11.1.2)，其中包含 `emitSampleBuffer:`、`mediaTypeIsVideo`、`name`和 `node` 等成员。这些是运行时反射结果，不是 Apple 稳定 API 承诺，所以代码只在签名检查成功后调用。
+MJPEG 的 URLSession 回调只做增量边界解析并更新一个“最新完整 JPEG”槽，实际 ImageIO 解码位于独立的高优先级串行队列；解码期间到达的旧帧被新帧覆盖，网络 socket 不等待像素解码。本地文件按媒体 PTS 节奏读取，超过两个目标帧间隔的旧视频帧直接丢弃，音频仍连续推进，避免解码抖动演变成持续音画延迟。
 
-## 当前边界
+本地文件路径同时定义一个目录播放列表：SpringBoard 只枚举同目录内受支持的视频扩展名并自然排序。`SBVolumeControl` 的方法签名在运行时确认为无参数 `void` 后才安装音量键 Hook；音量加选择下一项、音量减选择上一项，并用 350 ms 防抖抑制长按重复。非本地来源、无可切换项目或私有方法不匹配时完整调用原音量实现。
 
-`BWNodeOutput` 是私有类，项目运行时查找并最多重试 10 秒，在 Hook 前还会验证方法参数数量、返回类型和样本缓冲指针类型；`mediaTypeIsVideo` 只在返回签名确认为 `BOOL` 时调用。不存在或签名不匹配时不会盲目调用。失败时真实相机保持可用，并可从设置切换到应用层兼容模式。每个 iOS 小版本和目标应用仍需要实机验证。
+内存压力时清理 VideoToolbox 会话、转换缓存与多余 Surface；严重压力释放音频环。生产者的下一帧会自动重建。停用或切换来源时先停止回调、增加 generation，再清空视频/音频通知，消费者立刻恢复真实相机和麦克风。
+
+## 身份与元数据边界
+
+项目不 Hook `AVCaptureDevice` 发现和能力 API，不改 bundle/process/签名身份，也不伪造 Apple 系统组件、相机名称、镜头、设备型号或 EXIF。系统集成依靠精确的进程过滤和运行时能力探测，不依靠身份伪装。
+
+照片中的深度、视差、人物/语义蒙版、HDR 增益图和辅助图属于物理场景。替换主图没有可信重建数据时会抑制这些不匹配载荷，避免生成内部矛盾的照片文件。
+
+## 仍需实机确认的私有边界
+
+`BWNodeOutput` 和 `CARenderServerRenderDisplay` 都不是 Apple 稳定 API。代码针对 iOS 15.x 运行时检查并 fail-open，但以下内容必须在每个目标小版本实机验收：系统 Camera 全模式、FaceTime、第三方录像、WebKit `getUserMedia`、扫码、前后台切换、来电中断、横竖屏、内存压力和 SpringBoard/`mediaserverd` 重启。
+
+参考：
+
+- [Theos rootless](https://theos.dev/docs/rootless)
+- [Cydia Substrate Darwin deployment](https://www.cydiasubstrate.com/inject/darwin/)
+- [Apple TN3121：选择相机输出像素格式](https://developer.apple.com/documentation/technotes/tn3121-selecting-a-pixel-format-for-an-avcapturevideodataoutput)
+- [MurkAskA01/ios-vcam](https://github.com/MurkAskA01/ios-vcam)
+- [donets2013/MyVcam](https://github.com/donets2013/MyVcam)

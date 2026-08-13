@@ -131,6 +131,51 @@ static void testInvalidSegmentLengthAndMissingSOI(void) {
                                &frameLength) == VCJPEGParserResultInvalid);
 }
 
+static void testFrameDimensionsSurviveIncrementalParsing(void) {
+    static const uint8_t jpeg[] = {
+        0xFF, 0xD8,
+        // Baseline SOF, 1080 high by 1920 wide, one component.
+        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x04, 0x38, 0x07, 0x80,
+        0x01, 0x01, 0x11, 0x00,
+        0xFF, 0xDA, 0x00, 0x04, 0x00, 0x00,
+        'p', 'i', 'x', 0xFF, 0xD9,
+    };
+    VCJPEGParserState state = {0};
+    size_t frameLength = 0;
+    assert(VCJPEGParserConsume(jpeg,
+                               15,
+                               &state,
+                               &frameLength) == VCJPEGParserResultNeedMoreData);
+    assert(state.sawFrameDimensions);
+    assert(state.width == 1920);
+    assert(state.height == 1080);
+    assert(VCJPEGParserConsume(jpeg,
+                               sizeof(jpeg),
+                               &state,
+                               &frameLength) == VCJPEGParserResultFrameComplete);
+    assert(frameLength == sizeof(jpeg));
+    assert(state.sawFrameDimensions);
+    assert(state.width == 1920);
+    assert(state.height == 1080);
+    VCJPEGParserReset(&state);
+    assert(!state.sawFrameDimensions && state.width == 0 && state.height == 0);
+}
+
+static void testInvalidFrameDimensions(void) {
+    static const uint8_t zeroWidth[] = {
+        0xFF, 0xD8,
+        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x10, 0x00, 0x00,
+        0x01, 0x01, 0x11, 0x00,
+        0xFF, 0xD9,
+    };
+    VCJPEGParserState state = {0};
+    size_t frameLength = 0;
+    assert(VCJPEGParserConsume(zeroWidth,
+                               sizeof(zeroWidth),
+                               &state,
+                               &frameLength) == VCJPEGParserResultInvalid);
+}
+
 int main(void) {
     testIncrementalBaselineAndEmbeddedThumbnail();
     testProgressiveScans();
@@ -139,6 +184,8 @@ int main(void) {
     testConcatenatedFramesReturnOneFrameAtATime();
     testMarkerSplitAcrossCallbacks();
     testInvalidSegmentLengthAndMissingSOI();
+    testFrameDimensionsSurviveIncrementalParsing();
+    testInvalidFrameDimensions();
     puts("VCJPEGParser tests passed");
     return 0;
 }

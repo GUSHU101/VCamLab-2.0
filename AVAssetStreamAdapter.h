@@ -19,9 +19,6 @@ typedef void (^AVAssetErrorCallback)(NSError *error);
 @property (atomic, assign, readonly, getter=isConnecting) BOOL connecting;
 @property (atomic, assign, readonly) NSUInteger frameCount;
 @property (atomic, assign, readonly) CFAbsoluteTime lastFrameTime;
-@property (atomic, assign) NSInteger preferredFPS;
-@property (atomic, assign) NSInteger maximumPixelDimension;
-
 @property (atomic, copy, nullable) AVAssetPixelBufferCallback pixelBufferCallback;
 @property (atomic, copy, nullable) AVAssetErrorCallback errorCallback;
 

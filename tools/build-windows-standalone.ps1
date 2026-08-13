@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $projectRoot `
-        "artifacts\VirtualCamPro-Windows-Control-Center-2.8.0-standalone"
+        "artifacts\VirtualCamPro-Windows-Control-Center-2.10.0-standalone"
 }
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
 [IO.Directory]::CreateDirectory($outputRoot) | Out-Null
@@ -29,7 +29,10 @@ $copyMap = [ordered]@{
     "$controlCenterRoot\DEPLOYMENT.md" = "DEPLOYMENT.md"
     "$controlCenterRoot\使用说明.txt" = "使用说明.txt"
     "$controlCenterRoot\scripts\windows-vcam.ps1" = "scripts\windows-vcam.ps1"
+    "$controlCenterRoot\scripts\launch-control-center.ps1" = "scripts\launch-control-center.ps1"
     "$controlCenterRoot\scripts\obs-websocket.ps1" = "scripts\obs-websocket.ps1"
+    "$controlCenterRoot\scripts\hls-server.ps1" = "scripts\hls-server.ps1"
+    "$controlCenterRoot\scripts\deep-self-test.ps1" = "scripts\deep-self-test.ps1"
     "$controlCenterRoot\scripts\install-ios.ps1" = "scripts\install-ios.ps1"
     "$controlCenterRoot\scripts\install-ios-gui.ps1" = "scripts\install-ios-gui.ps1"
     "$controlCenterRoot\scripts\verify-standalone.ps1" = "scripts\verify-standalone.ps1"
@@ -101,7 +104,7 @@ $manifestFiles = @($deliveredPaths | Sort-Object -Unique | ForEach-Object {
 $manifest = [ordered]@{
     schemaVersion = 1
     toolName = "VirtualCamPro Windows Control Center"
-    toolVersion = "2.8.0"
+    toolVersion = "2.10.0"
     generatedAtUtc = [DateTime]::UtcNow.ToString("o")
     sourceCommit = $sourceCommit
     sourceDirty = [bool]$sourceDirty

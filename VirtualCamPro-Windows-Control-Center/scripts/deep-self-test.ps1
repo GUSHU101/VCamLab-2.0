@@ -190,7 +190,7 @@ function Wait-TcpPort {
 function Invoke-HttpProbe {
     param(
         [Parameter(Mandatory = $true)][string]$URL,
-        [ValidateSet("GET", "HEAD", "OPTIONS")][string]$Method = "GET",
+        [ValidateSet("GET", "HEAD", "OPTIONS", "POST")][string]$Method = "GET",
         [int]$RangeStart = -1,
         [int]$RangeEnd = -1
     )
@@ -202,7 +202,16 @@ function Invoke-HttpProbe {
     if ($RangeStart -ge 0 -and $RangeEnd -ge $RangeStart) {
         $request.AddRange($RangeStart, $RangeEnd)
     }
-    $response = [Net.HttpWebResponse]$request.GetResponse()
+    $response = $null
+    try {
+        $response = [Net.HttpWebResponse]$request.GetResponse()
+    } catch [Net.WebException] {
+        if ($_.Exception.Response) {
+            $response = [Net.HttpWebResponse]$_.Exception.Response
+        } else {
+            throw
+        }
+    }
     try {
         $body = New-Object byte[] 0
         if ($Method -ne "HEAD") {
@@ -227,6 +236,8 @@ function Invoke-HttpProbe {
             ContentLength = [long]$response.ContentLength
             AllowOrigin = [string]$response.Headers["Access-Control-Allow-Origin"]
             ContentRange = [string]$response.Headers["Content-Range"]
+            CacheControl = [string]$response.Headers["Cache-Control"]
+            ContentTypeOptions = [string]$response.Headers["X-Content-Type-Options"]
             Body = $body
         }
     } finally {
@@ -238,9 +249,22 @@ function Test-HlsServerRuntime {
     $serverScript = Join-Path $root "scripts\hls-server.ps1"
     $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("VirtualCamPro-deep-test-" + [Guid]::NewGuid().ToString("N"))
     [IO.Directory]::CreateDirectory($tempRoot) | Out-Null
-    $playlist = "#EXTM3U`n#EXT-X-VERSION:3`n#EXT-X-TARGETDURATION:1`n#EXTINF:1.0,`nsegment_000000.ts`n"
+    $programTime = "2026-01-01T00:00:00.000Z"
+    $playlistLines = New-Object Collections.Generic.List[string]
+    foreach ($line in @("#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:1", "#EXT-X-INDEPENDENT-SEGMENTS", "#EXT-X-PROGRAM-DATE-TIME:$programTime")) {
+        $playlistLines.Add($line)
+    }
+    for ($index = 0; $index -lt 6; $index++) {
+        $playlistLines.Add("#EXTINF:0.25,")
+        $playlistLines.Add(("segment_{0:D6}.ts" -f $index))
+    }
+    $playlist = ($playlistLines -join "`n") + "`n"
     [IO.File]::WriteAllText((Join-Path $tempRoot "live.m3u8"), $playlist, (New-Object Text.UTF8Encoding($false)))
-    [IO.File]::WriteAllBytes((Join-Path $tempRoot "segment_000000.ts"), [byte[]](0, 1, 2, 3, 4, 5, 6, 7))
+    for ($index = 0; $index -lt 6; $index++) {
+        [IO.File]::WriteAllBytes(
+            (Join-Path $tempRoot ("segment_{0:D6}.ts" -f $index)),
+            [byte[]](0, 1, 2, 3, 4, 5, 6, 7))
+    }
     $port = Get-FreeLoopbackPort
     $powershell = Get-ChildPowerShellPath
     if ([string]::IsNullOrWhiteSpace($powershell)) { throw "powershell.exe not found" }
@@ -265,11 +289,18 @@ function Test-HlsServerRuntime {
         $playlistResult = Invoke-HttpProbe -URL "$base/live.m3u8"
         if ($playlistResult.StatusCode -ne 200 -or
             $playlistResult.ContentType -notlike "application/vnd.apple.mpegurl*" -or
-            $playlistResult.AllowOrigin -ne "*") {
+            $playlistResult.AllowOrigin -ne "*" -or
+            $playlistResult.CacheControl -notlike "*no-store*" -or
+            $playlistResult.ContentTypeOptions -ne "nosniff") {
             throw "HLS playlist GET response is invalid."
         }
         $playlistText = [Text.Encoding]::UTF8.GetString($playlistResult.Body)
-        if ($playlistText -notlike "*segment_000000.ts*") { throw "HLS playlist body is incomplete." }
+        $listedSegments = ([regex]::Matches($playlistText, '(?m)^segment_[0-9]{6}[.]ts$')).Count
+        if ($listedSegments -lt 6 -or
+            $playlistText -notlike "*#EXT-X-INDEPENDENT-SEGMENTS*" -or
+            $playlistText -notlike "*#EXT-X-PROGRAM-DATE-TIME:*") {
+            throw "HLS playlist is missing the six-segment/PDT/independent-segment contract."
+        }
 
         $headResult = Invoke-HttpProbe -URL "$base/segment_000000.ts" -Method HEAD
         if ($headResult.StatusCode -ne 200 -or $headResult.ContentLength -ne 8 -or
@@ -282,6 +313,22 @@ function Test-HlsServerRuntime {
             $rangeResult.Body[0] -ne 1 -or $rangeResult.Body[2] -ne 3 -or
             $rangeResult.ContentRange -ne "bytes 1-3/8") {
             throw "HLS byte-range response is invalid."
+        }
+
+        $invalidRangeResult = Invoke-HttpProbe -URL "$base/segment_000000.ts" -RangeStart 20 -RangeEnd 25
+        if ($invalidRangeResult.StatusCode -ne 416 -or
+            $invalidRangeResult.ContentRange -ne "bytes */8") {
+            throw "HLS invalid-range response is not RFC-compatible."
+        }
+
+        $missingResult = Invoke-HttpProbe -URL "$base/%2e%2e/control"
+        if ($missingResult.StatusCode -notin @(403, 404)) {
+            throw "HLS path allow-list rejected an unsafe path with an unexpected status."
+        }
+
+        $methodResult = Invoke-HttpProbe -URL "$base/live.m3u8" -Method POST
+        if ($methodResult.StatusCode -ne 405) {
+            throw "HLS unsupported-method response is invalid."
         }
 
         $optionsResult = Invoke-HttpProbe -URL "$base/live.m3u8" -Method OPTIONS
@@ -358,10 +405,17 @@ function Test-FfmpegMjpegRuntime {
             $stream = $response.GetResponseStream()
             try {
                 $buffer = New-Object byte[] 4096
-                $read = $stream.Read($buffer, 0, $buffer.Length)
-                if ($read -le 0) { throw "MJPEG listener returned no body bytes." }
-                $sample = [Text.Encoding]::ASCII.GetString($buffer, 0, $read)
-                if ($sample -notlike "*--ffmpeg*" -or $sample -notlike "*Content-type: image/jpeg*") {
+                $sampleBuilder = New-Object Text.StringBuilder
+                while ($sampleBuilder.Length -lt 65536) {
+                    $read = $stream.Read($buffer, 0, $buffer.Length)
+                    if ($read -le 0) { break }
+                    [void]$sampleBuilder.Append([Text.Encoding]::ASCII.GetString($buffer, 0, $read))
+                    $candidateText = $sampleBuilder.ToString()
+                    if ($candidateText -match '(?is)--ffmpeg.*?content-type\s*:\s*image/jpeg') { break }
+                }
+                $sample = $sampleBuilder.ToString()
+                if ($sample.Length -eq 0) { throw "MJPEG listener returned no body bytes." }
+                if ($sample -notmatch '(?is)--ffmpeg.*?content-type\s*:\s*image/jpeg') {
                     throw "MJPEG multipart boundary or JPEG part header was not found."
                 }
             } finally {
@@ -473,8 +527,11 @@ try {
         Write-DeepResult -Level "FAIL" -Message "VCAM_SCALE_MODE is invalid."
     }
     [void](Test-IntegerSetting -Values $config -Name "VCAM_QUALITY" -Minimum 1 -Maximum 31)
-    [void](Test-DecimalSetting -Values $config -Name "VCAM_HLS_SEGMENT_SECONDS" -Minimum 0.5 -Maximum 10)
-    [void](Test-IntegerSetting -Values $config -Name "VCAM_HLS_LIST_SIZE" -Minimum 2 -Maximum 30)
+    [void](Test-DecimalSetting -Values $config -Name "VCAM_HLS_SEGMENT_SECONDS" -Minimum 0.2 -Maximum 10)
+    $hlsListSize = Test-IntegerSetting -Values $config -Name "VCAM_HLS_LIST_SIZE" -Minimum 6 -Maximum 30
+    if ($null -ne $hlsListSize -and $hlsListSize -lt 6) {
+        Write-DeepResult -Level "FAIL" -Message "Apple-compatible live HLS playlists require at least six segments."
+    }
     $hlsTarget = Test-IntegerSetting -Values $config -Name "VCAM_HLS_VIDEO_BITRATE_KBPS" -Minimum 500 -Maximum 100000
     $hlsMax = Test-IntegerSetting -Values $config -Name "VCAM_HLS_MAXRATE_KBPS" -Minimum 500 -Maximum 120000
     [void](Test-IntegerSetting -Values $config -Name "VCAM_HLS_BUFSIZE_KBPS" -Minimum 500 -Maximum 200000)
@@ -568,7 +625,7 @@ try {
 
 try {
     Test-HlsServerRuntime
-    Write-DeepResult -Level "PASS" -Message "HLS HTTP runtime test passed: GET, HEAD, Range 206 and OPTIONS/CORS."
+    Write-DeepResult -Level "PASS" -Message "HLS HTTP runtime test passed: six-segment playlist, PDT, GET/HEAD, 206/416, method/path guards and CORS."
 } catch {
     Write-DeepResult -Level "FAIL" -Message "HLS HTTP runtime test failed: $($_.Exception.Message)"
 }
@@ -628,15 +685,18 @@ if ([string]::IsNullOrWhiteSpace($ffmpegPath)) {
                 $smokePlaylist = Join-Path $ffmpegSmokeRoot "live.m3u8"
                 $smokeSegmentPattern = Join-Path $ffmpegSmokeRoot "segment_%06d.ts"
                 $smokeOutput = (& $ffmpegPath -hide_banner -loglevel error -f lavfi -i "testsrc2=size=320x240:rate=30" `
-                    -t 2 -an -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 30 -keyint_min 30 -sc_threshold 0 `
-                    -f hls -hls_time 1 -hls_list_size 3 -hls_flags independent_segments `
+                    -t 2 -an -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p `
+                    -g 8 -keyint_min 8 -sc_threshold 0 -force_key_frames "expr:gte(t,n_forced*0.25)" `
+                    -f hls -hls_time 0.25 -hls_list_size 6 -hls_flags independent_segments+program_date_time+temp_file `
                     -hls_segment_filename $smokeSegmentPattern $smokePlaylist 2>&1 | ForEach-Object { $_.ToString() }) -join "`n"
                 $ffmpegSmokeExit = $LASTEXITCODE
                 $segmentCount = @(Get-ChildItem -LiteralPath $ffmpegSmokeRoot -Filter "segment_*.ts" -File -ErrorAction SilentlyContinue).Count
                 if ($ffmpegSmokeExit -eq 0 -and (Test-Path -LiteralPath $smokePlaylist -PathType Leaf) -and $segmentCount -gt 0) {
                     $smokeText = [IO.File]::ReadAllText($smokePlaylist)
-                    if ($smokeText -like "*#EXTM3U*" -and $smokeText -like "*segment_*") {
-                        Write-DeepResult -Level "PASS" -Message "FFmpeg generated a real H.264 HLS playlist and segment."
+                    if ($smokeText -like "*#EXTM3U*" -and $smokeText -like "*segment_*" -and
+                        $smokeText -like "*#EXT-X-INDEPENDENT-SEGMENTS*" -and
+                        $smokeText -like "*#EXT-X-PROGRAM-DATE-TIME:*") {
+                        Write-DeepResult -Level "PASS" -Message "FFmpeg generated H.264 HLS with independent segments and program date/time."
                     } else {
                         Write-DeepResult -Level "WARN" -Message "FFmpeg HLS smoke output was generated but the playlist content was unexpected."
                     }

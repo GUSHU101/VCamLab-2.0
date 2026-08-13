@@ -8,6 +8,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (instancetype)sharedCoordinator;
 - (void)startMonitoring;
 - (void)refreshPreferencesAndStream;
+/// Returned shared buffers must be released with
+/// VCReleaseSharedVideoPixelBuffer(), not CVPixelBufferRelease().
 - (CVPixelBufferRef)copyLatestPixelBuffer CF_RETURNS_RETAINED;
 - (CVPixelBufferRef)copyLatestPixelBufferWithAspectFill:(BOOL * _Nullable)aspectFill
                                            preferredFPS:(NSInteger * _Nullable)preferredFPS CF_RETURNS_RETAINED;
@@ -21,6 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)aspectFill;
 - (BOOL)holdLastFrame;
 - (NSTimeInterval)staleFrameTimeout;
+/// SpringBoard volume-up selects the next video and volume-down the previous
+/// video in the selected local file's directory. Returns YES when consumed.
+- (BOOL)handleLocalMediaVolumeButtonDirection:(NSInteger)direction;
 
 @end
 

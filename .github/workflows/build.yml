@@ -1,0 +1,89 @@
+name: Build rootless package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: rootless-package-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  THEOS_COMMIT: 5280bd038207e14f8bd76f5417aa2fe641c03228
+  THEOS_SDKS_COMMIT: 0222fd5413cf4b9af096f37b4621afa2688572f7
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld make perl python3 xz-utils dpkg-dev \
+            fakeroot file libtinfo6
+
+      - name: Install pinned Theos and iOS SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          THEOS_PATH="$RUNNER_TEMP/theos"
+          git clone --filter=blob:none --no-checkout https://github.com/theos/theos.git "$THEOS_PATH"
+          git -C "$THEOS_PATH" fetch --depth=1 origin "$THEOS_COMMIT"
+          git -C "$THEOS_PATH" checkout --detach "$THEOS_COMMIT"
+          git -C "$THEOS_PATH" submodule update --init --recursive --depth=1
+          rm -rf "$THEOS_PATH/sdks"
+          git clone --filter=blob:none --no-checkout https://github.com/theos/sdks.git "$THEOS_PATH/sdks"
+          git -C "$THEOS_PATH/sdks" fetch --depth=1 origin "$THEOS_SDKS_COMMIT"
+          git -C "$THEOS_PATH/sdks" checkout --detach "$THEOS_SDKS_COMMIT"
+          test "$(git -C "$THEOS_PATH" rev-parse HEAD)" = "$THEOS_COMMIT"
+          test "$(git -C "$THEOS_PATH/sdks" rev-parse HEAD)" = "$THEOS_SDKS_COMMIT"
+
+      - name: Validate and compile arm64 plus arm64e
+        env:
+          THEOS: ${{ runner.temp }}/theos
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_project.py
+          make clean
+          make package FINALPACKAGE=1 DEBUG=0
+
+      - name: Verify Debian payload
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find packages -maxdepth 1 -type f \
+            -name 'com.murkaska.virtualcampro_*_iphoneos-arm64.deb' -print)
+          test "${#packages[@]}" -eq 1
+          bash scripts/verify_deb.sh "${packages[0]}" "$RUNNER_TEMP/SHA256SUMS"
+          {
+            printf 'commit=%s\n' "$GITHUB_SHA"
+            printf 'theos=%s\n' "$THEOS_COMMIT"
+            printf 'sdks=%s\n' "$THEOS_SDKS_COMMIT"
+            printf 'runner=%s\n' "$RUNNER_OS/$RUNNER_ARCH"
+            dpkg-deb -f "${packages[0]}" Package Version Architecture
+          } > "$RUNNER_TEMP/build-metadata.txt"
+
+      - name: Upload verified rootless package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: VirtualCamPro-rootless
+          path: |
+            packages/*.deb
+            ${{ runner.temp }}/SHA256SUMS
+            ${{ runner.temp }}/build-metadata.txt
+          if-no-files-found: error
+          retention-days: 30

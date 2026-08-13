@@ -12,7 +12,9 @@ NSString * const VCMirrorSourceKey = @"mirrorSource";
 NSString * const VCMaximumPixelDimensionKey = @"maximumPixelDimension";
 NSString * const VCJPEGQualityKey = @"jpegQuality";
 NSString * const VCAspectFillKey = @"aspectFill";
-NSString * const VCCompatibilityModeKey = @"compatibilityMode";
+NSString * const VCSourceTypeKey = @"sourceType";
+NSString * const VCLocalMediaPathKey = @"localMediaPath";
+NSString * const VCLoopLocalMediaKey = @"loopLocalMedia";
 NSString * const VCHoldLastFrameKey = @"holdLastFrame";
 NSString * const VCStaleFrameTimeoutKey = @"staleFrameTimeout";
 
@@ -27,7 +29,9 @@ static NSString * const VCLegacyPreferencesPath = @"/var/mobile/Library/Preferen
 @property (atomic, assign, readwrite) NSInteger maximumPixelDimension;
 @property (atomic, assign, readwrite) CGFloat jpegQuality;
 @property (atomic, assign, readwrite) BOOL aspectFill;
-@property (atomic, assign, readwrite) BOOL compatibilityMode;
+@property (atomic, assign, readwrite) VCSourceType sourceType;
+@property (atomic, copy, readwrite, nullable) NSURL *localMediaURL;
+@property (atomic, assign, readwrite) BOOL loopLocalMedia;
 @property (atomic, assign, readwrite) BOOL holdLastFrame;
 @property (atomic, assign, readwrite) NSTimeInterval staleFrameTimeout;
 @end
@@ -61,7 +65,9 @@ static id VCReadPreference(NSString *key) {
     id maximumPixelDimensionValue = VCReadPreference(VCMaximumPixelDimensionKey);
     id qualityValue = VCReadPreference(VCJPEGQualityKey);
     id aspectFillValue = VCReadPreference(VCAspectFillKey);
-    id compatibilityModeValue = VCReadPreference(VCCompatibilityModeKey);
+    id sourceTypeValue = VCReadPreference(VCSourceTypeKey);
+    id localMediaPathValue = VCReadPreference(VCLocalMediaPathKey);
+    id loopLocalMediaValue = VCReadPreference(VCLoopLocalMediaKey);
     id holdLastFrameValue = VCReadPreference(VCHoldLastFrameKey);
     id staleFrameTimeoutValue = VCReadPreference(VCStaleFrameTimeoutKey);
 
@@ -94,7 +100,12 @@ static id VCReadPreference(NSString *key) {
     jpegQuality = MAX(0.50, MIN(1.0, jpegQuality));
 
     BOOL aspectFill = aspectFillValue ? [aspectFillValue boolValue] : YES;
-    BOOL compatibilityMode = compatibilityModeValue ? [compatibilityModeValue boolValue] : NO;
+    NSInteger sourceTypeValueInteger = sourceTypeValue ? [sourceTypeValue integerValue]
+                                                       : VCSourceTypeNetwork;
+    VCSourceType sourceType = (sourceTypeValueInteger >= VCSourceTypeNetwork &&
+                               sourceTypeValueInteger <= VCSourceTypeLocalMedia)
+        ? (VCSourceType)sourceTypeValueInteger : VCSourceTypeNetwork;
+    BOOL loopLocalMedia = loopLocalMediaValue ? [loopLocalMediaValue boolValue] : YES;
     BOOL holdLastFrame = holdLastFrameValue ? [holdLastFrameValue boolValue] : YES;
     NSTimeInterval staleFrameTimeout = staleFrameTimeoutValue ? [staleFrameTimeoutValue doubleValue] : 8.0;
     staleFrameTimeout = MAX(2.0, MIN(30.0, staleFrameTimeout));
@@ -112,6 +123,20 @@ static id VCReadPreference(NSString *key) {
         }
     }
 
+    NSURL *localMediaURL = nil;
+    if ([localMediaPathValue isKindOfClass:[NSString class]]) {
+        NSString *path = [localMediaPathValue
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        NSString *standardized = path.stringByStandardizingPath;
+        BOOL approvedRoot = [standardized hasPrefix:@"/var/mobile/Media/"] ||
+                            [standardized hasPrefix:@"/var/mobile/Library/VirtualCamPro/"];
+        if (path.length > 0 && path.length <= 4096 && path.isAbsolutePath &&
+            approvedRoot && ![path.pathComponents containsObject:@".."] &&
+            ![standardized hasSuffix:@"/"]) {
+            localMediaURL = [NSURL fileURLWithPath:standardized isDirectory:NO];
+        }
+    }
+
     @synchronized (self) {
         BOOL changed = self.enabled != enabled ||
                        self.preferredFPS != preferredFPS ||
@@ -120,10 +145,13 @@ static id VCReadPreference(NSString *key) {
                        self.maximumPixelDimension != maximumPixelDimension ||
                        fabs(self.jpegQuality - jpegQuality) > DBL_EPSILON ||
                        self.aspectFill != aspectFill ||
-                       self.compatibilityMode != compatibilityMode ||
+                       self.sourceType != sourceType ||
+                       self.loopLocalMedia != loopLocalMedia ||
                        self.holdLastFrame != holdLastFrame ||
                        fabs(self.staleFrameTimeout - staleFrameTimeout) > DBL_EPSILON ||
-                       !((self.streamURL == streamURL) || [self.streamURL isEqual:streamURL]);
+                       !((self.streamURL == streamURL) || [self.streamURL isEqual:streamURL]) ||
+                       !((self.localMediaURL == localMediaURL) ||
+                         [self.localMediaURL isEqual:localMediaURL]);
 
         self.enabled = enabled;
         self.streamURL = streamURL;
@@ -133,7 +161,9 @@ static id VCReadPreference(NSString *key) {
         self.maximumPixelDimension = maximumPixelDimension;
         self.jpegQuality = jpegQuality;
         self.aspectFill = aspectFill;
-        self.compatibilityMode = compatibilityMode;
+        self.sourceType = sourceType;
+        self.localMediaURL = localMediaURL;
+        self.loopLocalMedia = loopLocalMedia;
         self.holdLastFrame = holdLastFrame;
         self.staleFrameTimeout = staleFrameTimeout;
         return changed;

@@ -1,12 +1,27 @@
 # Changelog
 
-## Unreleased
+## 2.10.0 - 2026-08-14
 
+- Made network sources sender-authoritative: phone rotation, mirroring, FPS, JPEG quality, aspect and decode-size preferences are ignored for HLS/MJPEG, and network/ screen sources always preserve the native microphone.
+- Split MJPEG socket parsing from ImageIO decode with a one-frame latest-only decode slot; full sender dimensions are decoded without EXIF orientation or phone-side thumbnailing.
+- Added SOF dimension extraction and a real-time VideoToolbox JPEG decode path that requests an IOSurface-backed NV12 buffer, reports whether hardware acceleration was actually selected, and safely falls back to ImageIO after unsupported or repeated decode failures.
+- Added five-second MJPEG health telemetry for parsed, decoded, superseded and failed frames plus average decode time, making phone decode pressure distinguishable from sender/network loss.
+- Added local-only decode-size/FPS controls, late-video-frame rejection, allocation-free contiguous PCM reads, and volume-up/down navigation through naturally sorted videos in the selected local directory.
+- Replaced second-scale Windows buffering with bounded adaptive queues (64 MiB/4-frame/3-frame floors, roughly 250/250/150 ms burst targets and a 1 MiB TCP send buffer) and changed HLS defaults to 250 ms segments, an Apple-compatible six-segment live window and `ultrafast` encoding.
+- Added current-mode MJPEG capacity preflight, adaptive Huffman-table selection, and runtime-tested Intel Quick Sync MJPEG offload; advertised but unusable hardware sessions fall back to software without changing OBS resolution, FPS or quality.
+- Added independent-segment and program-date-time HLS metadata, atomic temporary segment publication, and HTTP runtime coverage for HEAD, CORS, byte ranges, unsatisfiable ranges, unsafe paths and unsupported methods.
+- Replaced the manual system/compatibility split with one SpringBoard producer, a three-slot global IOSurface video bus, and automatic system-heartbeat-based AVFoundation failover.
+- Added explicit cross-process IOSurface use-count leases; synchronous converters release after transfer, Core Animation retains through display commit, and photo snapshots deep-copy before asynchronous use so producer pools cannot recycle visible storage.
+- Moved all HLS/MJPEG decoding out of `mediaserverd` and application processes; consumers now map the same IOSurface instead of opening duplicate connections or decoding duplicate frames.
+- Added direct SpringBoard screen rendering into IOSurface and paced local MP4/MOV/MP3 reading on a shared asset timeline.
+- Added a three-second atomic IOSurface PCM ring and format-preserving system/application audio replacement; pure audio files replace the microphone while preserving physical camera video. Interleaved and non-interleaved LPCM now use a correctly shaped `AudioBufferList`, retain sample attachments and consume the ring with a continuous, overrun-resynchronizing cursor.
+- Extended the `BWNodeOutput` path to classify both color and PCM samples while strictly passing depth, disparity, metadata, compressed and unknown formats through unchanged.
+- Narrowed application injection to AVFoundation video/audio output, preview and photo classes; all failed private lookups and media conversions remain fail-open.
 - Consolidated the ready-to-run Windows control center, official Rootless package, integrity manifest, and current deployment guide under `VirtualCamPro-Windows-Control-Center/`; removed duplicate root launchers and obsolete local build debris.
 - Made the package-free Windows GUI path safe on clean machines, preserved PowerShell test failures through the CMD launcher, and switched the CI staging directory to an artifact-uploader-safe ASCII name.
-- Decoupled DirectShow capture from slow HTTP clients with adaptive buffering (256 MiB/32-frame/64-frame floors), four-thread MJPEG encoding, an encoded FIFO, and a 4 MiB low-latency TCP buffer, without reducing configured FPS or JPEG quality.
+- Decoupled DirectShow capture from slow HTTP clients with bounded queues and four-thread MJPEG encoding without reducing configured FPS or JPEG quality.
 - Made compatibility-mode preview display the exact converted application output frame, and made photo preview, pixel-buffer, CGImage, and file representations share one atomic source-frame snapshot.
-- Unified installer, preferences, decoder, preview, and sample-timing defaults at a stable 60 FPS baseline instead of silently retaining legacy 30 FPS defaults.
+- Kept 60 FPS as the local-file default while removing phone-side network rate control.
 - Bypassed the Lanczos scale/crop stage when OBS already publishes the exact canvas, preserving source pixels while reducing filter CPU load at 1080p60 and above.
 - Reworked the 60 FPS MJPEG receive hot path around a forward cursor and 1 MiB batched compaction instead of shifting the buffer after every frame, while retaining the 24/32 MiB frame and receive safety limits.
 - Serialized MJPEG parser/pool teardown across reconnects and memory-pressure callbacks, revalidated the active session before frame delivery, and raised the bounded decode-pool allowance to six buffers to prevent transient fail-open flashes during photo/preview fan-out.
@@ -35,8 +50,8 @@
 - Rejected links, reparse points, and all unmanifested files during standalone verification, closing path-redirection and side-load gaps around the hashed payload.
 - Froze the replacement route once per `AVCapturePhoto` (original, compatibility, or system pipeline), preventing network-state changes from making pixels, file data, depth, and mattes disagree for the same capture.
 - Deferred compatibility-preview BGRA conversion until a preview layer actually renders, eliminating an unnecessary per-frame GPU pass in headless recording and processing clients.
-- Removed the legacy 60 FPS software ceiling across OBS profile parsing, Windows overrides, deployment tools, preferences, MJPEG, and HLS; explicit rates up to 240 FPS are accepted only when the real producer/consumer path supports them, and Windows queues scale to retain roughly half a second of capture plus one second of encoded burst capacity.
-- Made DirectShow `rtbufsize` resolution/FPS-aware: 256 MiB remains the floor, while high-bandwidth modes scale toward half a second of raw buffering up to 1 GiB without changing their output mode.
+- Removed the legacy 60 FPS ceiling from Windows OBS/profile parsing and sender output; network receivers follow source cadence while local-file FPS remains independently configurable.
+- Made DirectShow `rtbufsize` resolution/FPS-aware with a 64 MiB floor and roughly 250 ms burst target capped at 256 MiB.
 - Removed the FFmpeg `fps` filter from exact OBS/DirectShow modes, preserving capture timestamps without jitter-driven duplication or drops; rate conversion remains only for file sources and explicitly permissive mismatched fallbacks.
 - Raised replacement-photo JPEG fallback quality to the quality-scale maximum (`1.0`) while retaining read-back metadata verification and authentic-original failover.
 - Raised the Windows MJPEG default from quality 5 to encoder-maximum quality 1 after a local 1080p60 stress run completed at roughly 17× real time; users may still choose a larger qscale explicitly, but no automatic quality reduction exists.
@@ -63,7 +78,7 @@
 - Accepted custom Windows rates from 1 through 60 FPS as integers, decimals, or rational expressions such as `30000/1001`, with locale-independent FFmpeg arguments.
 - Tightened OBS mode matching to distinguish fractional NTSC rates such as 29.97/59.94 from 30/60 while tolerating harmless driver reporting noise.
 - Added one-command FPS overrides to the OBS launcher and validated optional phone FPS configuration in `setup-config.sh`.
-- Expanded the phone decode/preview cap from 15–60 to 1–60 FPS and included the active cap in first-frame diagnostics.
+- Expanded the local-file FPS control to 1–240 while removing it from network decode policy.
 
 ## 2.5.0
 
@@ -84,7 +99,7 @@
 
 ## 2.4.0
 
-- Added one-pass GPU source orientation normalization with 0/90/180/270-degree rotation and optional horizontal mirroring before fan-out to camera outputs.
+- Added one-pass GPU orientation and horizontal mirroring for local-file sources before fan-out to camera outputs; network and screen sources bypass it.
 - Added validated MJPEG decode limits for 1280, 1920, 2560, and experimental 3840-pixel sources, defaulting to 1920 for the A10 device profile.
 - Reused the normalized source frame across preview, photo, video, browser, and third-party camera paths instead of rotating every downstream output.
 - Cleared stale oriented frames immediately when orientation preferences change and retained fail-open behavior when GPU rendering is unavailable.

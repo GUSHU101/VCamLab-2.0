@@ -4,7 +4,9 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <ImageIO/ImageIO.h>
+#import <IOSurface/IOSurface.h>
 #import <QuartzCore/QuartzCore.h>
+#import <VideoToolbox/VideoToolbox.h>
 #import <math.h>
 #import <os/lock.h>
 
@@ -13,8 +15,35 @@ static void *VCPlayerItemStatusContext = &VCPlayerItemStatusContext;
 static const NSUInteger VCMaximumJPEGFrameBytes = 24 * 1024 * 1024;
 static const NSUInteger VCMaximumMJPEGBufferBytes = 32 * 1024 * 1024;
 static const NSUInteger VCMJPEGBufferCompactionThresholdBytes = 1024 * 1024;
+// Three buffers are retained by the cross-process publication ring. Keep three
+// additional allocations for the decoder/current fan-out so a temporarily slow
+// photo or preview consumer does not force avoidable network-frame loss.
 static const NSUInteger VCMaximumOutstandingMJPEGBuffers = 6;
-static const NSInteger VCMaximumPreferredFPS = 240;
+static const NSInteger VCHLSPollingFPS = 240;
+static const CFTimeInterval VCMJPEGStatisticsInterval = 5.0;
+
+typedef struct {
+    CVPixelBufferRef pixelBuffer;
+    OSStatus status;
+    VTDecodeInfoFlags infoFlags;
+} VCMJPEGDecodeContext;
+
+static void VCMJPEGDecompressionOutputCallback(
+    __unused void *decompressionOutputRefCon,
+    void *sourceFrameRefCon,
+    OSStatus status,
+    VTDecodeInfoFlags infoFlags,
+    CVImageBufferRef imageBuffer,
+    __unused CMTime presentationTimeStamp,
+    __unused CMTime presentationDuration) {
+    VCMJPEGDecodeContext *context = (VCMJPEGDecodeContext *)sourceFrameRefCon;
+    if (!context) return;
+    context->status = status;
+    context->infoFlags = infoFlags;
+    if (status == noErr && imageBuffer && !(infoFlags & kVTDecodeInfo_FrameDropped)) {
+        context->pixelBuffer = CVPixelBufferRetain((CVPixelBufferRef)imageBuffer);
+    }
+}
 
 static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     static CGColorSpaceRef colorSpace;
@@ -29,11 +58,32 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     CVPixelBufferPoolRef _mjpegPixelBufferPool;
     size_t _mjpegPoolWidth;
     size_t _mjpegPoolHeight;
-    CFAbsoluteTime _lastMJPEGDecodeTime;
     CFAbsoluteTime _lastMJPEGErrorReportTime;
     VCJPEGParserState _mjpegParserState;
     NSUInteger _mjpegBufferOffset;
     os_unfair_lock _mjpegReceiveLock;
+    NSData *_pendingMJPEGData;
+    size_t _pendingMJPEGWidth;
+    size_t _pendingMJPEGHeight;
+    NSUInteger _pendingMJPEGConnectionGeneration;
+    NSUInteger _mjpegConnectionGeneration;
+    BOOL _mjpegDecodeScheduled;
+    VTDecompressionSessionRef _mjpegDecompressionSession;
+    CMVideoFormatDescriptionRef _mjpegVideoFormatDescription;
+    size_t _mjpegDecoderWidth;
+    size_t _mjpegDecoderHeight;
+    size_t _mjpegVTDisabledWidth;
+    size_t _mjpegVTDisabledHeight;
+    NSUInteger _mjpegVTConsecutiveFailures;
+    BOOL _mjpegVTUsesHardware;
+    uint64_t _mjpegParsedFrameCount;
+    uint64_t _mjpegSupersededFrameCount;
+    uint64_t _mjpegDecodedFrameCount;
+    uint64_t _mjpegVTDecodedFrameCount;
+    uint64_t _mjpegFallbackDecodedFrameCount;
+    uint64_t _mjpegDecodeFailureCount;
+    CFTimeInterval _mjpegTotalDecodeSeconds;
+    CFAbsoluteTime _mjpegLastStatisticsTime;
 }
 @property (nonatomic, strong, readwrite) NSURL *streamURL;
 @property (nonatomic, assign, readwrite) VCStreamProtocol streamProtocol;
@@ -53,7 +103,9 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
 @property (nonatomic, strong) dispatch_source_t frameTimer;
 @property (nonatomic, strong) dispatch_source_t healthTimer;
 @property (nonatomic, strong) dispatch_queue_t hlsFrameQueue;
+@property (nonatomic, strong) dispatch_queue_t mjpegDecodeQueue;
 @property (nonatomic, assign) BOOL observingPlayerItem;
+@property (nonatomic, assign) BOOL hlsLiveEdgeSeekInProgress;
 
 @property (atomic, assign) NSUInteger reconnectAttempt;
 @property (atomic, assign) NSUInteger lifecycleGeneration;
@@ -62,22 +114,33 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
 
 - (CVPixelBufferPoolRef)mjpegPixelBufferPoolForWidth:(size_t)width
                                               height:(size_t)height;
+- (CVPixelBufferRef)copyPixelBufferFromJPEGData:(NSData *)jpegData
+                                          width:(size_t)width
+                                         height:(size_t)height
+                         usedVideoToolbox:(BOOL *)usedVideoToolbox CF_RETURNS_RETAINED;
+- (CVPixelBufferRef)copyPixelBufferFromJPEGDataUsingVideoToolbox:(NSData *)jpegData
+                                                           width:(size_t)width
+                                                          height:(size_t)height CF_RETURNS_RETAINED;
+- (CVPixelBufferRef)copyPixelBufferFromJPEGDataUsingImageIO:(NSData *)jpegData
+                                                      width:(size_t)width
+                                                     height:(size_t)height CF_RETURNS_RETAINED;
+- (BOOL)prepareMJPEGDecompressionSessionForWidth:(size_t)width height:(size_t)height;
+- (void)recordMJPEGVideoToolboxFailureForWidth:(size_t)width height:(size_t)height;
 - (void)releaseMJPEGPixelBufferPool;
+- (void)releaseMJPEGDecompressionSession;
 - (void)resetMJPEGReceiveBufferLocked;
 - (void)compactMJPEGReceiveBufferLockedIfNeeded:(BOOL)force;
 - (void)reportMalformedMJPEGStream:(NSString *)description;
+- (void)decodePendingMJPEGFrames;
+- (void)catchUpToHLSLiveEdgeIfNeeded;
 @end
 
 @implementation AVAssetStreamAdapter
-
-@synthesize preferredFPS = _preferredFPS;
 
 - (instancetype)initWithURL:(NSURL *)url {
     self = [super init];
     if (self) {
         _streamURL = url;
-        _preferredFPS = 60;
-        _maximumPixelDimension = 1920;
         _mjpegReceiveLock = (os_unfair_lock)OS_UNFAIR_LOCK_INIT;
         dispatch_queue_attr_t hlsQueueAttributes =
             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
@@ -85,31 +148,12 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
                                                      0);
         _hlsFrameQueue = dispatch_queue_create("com.murkaska.virtualcampro.hls-frames",
                                                hlsQueueAttributes);
+        _mjpegDecodeQueue = dispatch_queue_create(
+            "com.murkaska.virtualcampro.mjpeg-decode", hlsQueueAttributes);
         NSString *absoluteString = url.absoluteString.lowercaseString;
         _streamProtocol = [absoluteString containsString:@".m3u8"] ? VCStreamProtocolHLS : VCStreamProtocolMJPEG;
     }
     return self;
-}
-
-- (void)setPreferredFPS:(NSInteger)preferredFPS {
-    NSInteger clampedFPS = MAX(1, MIN(VCMaximumPreferredFPS, preferredFPS));
-    @synchronized (self) {
-        _preferredFPS = clampedFPS;
-    }
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self.frameTimer) return;
-        uint64_t interval = NSEC_PER_SEC / (uint64_t)clampedFPS;
-        dispatch_source_set_timer(self.frameTimer,
-                                  dispatch_time(DISPATCH_TIME_NOW, 0),
-                                  interval,
-                                  interval / 10);
-    });
-}
-
-- (NSInteger)preferredFPS {
-    @synchronized (self) {
-        return _preferredFPS;
-    }
 }
 
 - (void)startStreaming {
@@ -157,15 +201,20 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
             if (!strongSelf) return;
             os_unfair_lock_lock(&strongSelf->_mjpegReceiveLock);
             [strongSelf resetMJPEGReceiveBufferLocked];
-            [strongSelf releaseMJPEGPixelBufferPool];
             os_unfair_lock_unlock(&strongSelf->_mjpegReceiveLock);
         }];
     } else {
         os_unfair_lock_lock(&_mjpegReceiveLock);
         [self resetMJPEGReceiveBufferLocked];
-        [self releaseMJPEGPixelBufferPool];
         os_unfair_lock_unlock(&_mjpegReceiveLock);
     }
+    // Pool creation and JPEG rendering live exclusively on this queue. Keeping
+    // pressure cleanup there prevents releasing a pool while ImageIO is still
+    // allocating/rendering its current frame.
+    dispatch_async(self.mjpegDecodeQueue, ^{
+        [self releaseMJPEGDecompressionSession];
+        [self releaseMJPEGPixelBufferPool];
+    });
 }
 
 #pragma mark - Shared state
@@ -257,6 +306,9 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
 }
 
 - (void)verifyStreamHealth {
+    if (self.streamProtocol == VCStreamProtocolHLS) {
+        [self catchUpToHLSLiveEdgeIfNeeded];
+    }
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     CFAbsoluteTime referenceTime;
     NSTimeInterval timeout;
@@ -283,6 +335,32 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     [self scheduleReconnectAfterError:error];
 }
 
+- (void)catchUpToHLSLiveEdgeIfNeeded {
+    AVPlayerItem *item = self.hlsPlayerItem;
+    AVPlayer *player = self.hlsPlayer;
+    if (!self.running || !item || !player || self.hlsLiveEdgeSeekInProgress ||
+        item.status != AVPlayerItemStatusReadyToPlay || item.seekableTimeRanges.count == 0) {
+        return;
+    }
+    CMTimeRange liveRange = item.seekableTimeRanges.lastObject.CMTimeRangeValue;
+    CMTime liveEdge = CMTimeRangeGetEnd(liveRange);
+    CMTime current = player.currentTime;
+    Float64 secondsBehind = CMTimeGetSeconds(CMTimeSubtract(liveEdge, current));
+    if (!isfinite(secondsBehind) || secondsBehind <= 1.0) return;
+    CMTime target = CMTimeSubtract(liveEdge, CMTimeMakeWithSeconds(0.10, 600));
+    if (CMTIME_COMPARE_INLINE(target, <, liveRange.start)) target = liveRange.start;
+    self.hlsLiveEdgeSeekInProgress = YES;
+    __weak AVAssetStreamAdapter *weakSelf = self;
+    [player seekToTime:target
+       toleranceBefore:kCMTimeZero
+        toleranceAfter:kCMTimeZero
+     completionHandler:^(__unused BOOL finished) {
+        AVAssetStreamAdapter *strongSelf = weakSelf;
+        strongSelf.hlsLiveEdgeSeekInProgress = NO;
+        if (strongSelf.running) [strongSelf.hlsPlayer play];
+    }];
+}
+
 #pragma mark - HLS
 
 - (void)startHLSStream {
@@ -301,11 +379,16 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
 
     NSDictionary *pixelBufferAttributes = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{
+            (id)kIOSurfaceIsGlobal: @YES,
+        },
     };
 
     AVPlayerItem *item = [AVPlayerItem playerItemWithURL:self.streamURL];
-    item.preferredForwardBufferDuration = 1.0;
+    // This is a live camera feed, not on-demand playback.  AVPlayer still owns
+    // protocol adaptation, but it must not intentionally build a second phone-
+    // side quality/rate buffer on top of the sender's live window.
+    item.preferredForwardBufferDuration = 0.25;
     AVPlayerItemVideoOutput *output = [[AVPlayerItemVideoOutput alloc]
                                        initWithPixelBufferAttributes:pixelBufferAttributes];
     output.suppressesPlayerRendering = YES;
@@ -329,8 +412,10 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     [center addObserver:self selector:@selector(playerItemPlaybackStalled:)
                    name:AVPlayerItemPlaybackStalledNotification object:item];
 
-    NSInteger framesPerSecond = MAX(1, MIN(VCMaximumPreferredFPS, self.preferredFPS));
-    uint64_t interval = NSEC_PER_SEC / (uint64_t)framesPerSecond;
+    // Poll faster than common source rates. hasNewPixelBufferForItemTime: is the
+    // rate gate, so this observes the sender cadence without inventing or dropping
+    // frames according to a phone preference.
+    uint64_t interval = NSEC_PER_SEC / (uint64_t)VCHLSPollingFPS;
     self.frameTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,
                                               0,
                                               0,
@@ -427,6 +512,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
         self.frameTimer = nil;
     }
     [self.hlsPlayer pause];
+    self.hlsLiveEdgeSeekInProgress = NO;
     self.hlsPlayer = nil;
     self.hlsPlayerItem = nil;
     self.videoOutput = nil;
@@ -441,8 +527,19 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
         self.lastFrameTime = 0;
     }
     os_unfair_lock_lock(&_mjpegReceiveLock);
-    _lastMJPEGDecodeTime = 0;
     _lastMJPEGErrorReportTime = 0;
+    _mjpegConnectionGeneration++;
+    _pendingMJPEGData = nil;
+    _pendingMJPEGWidth = 0;
+    _pendingMJPEGHeight = 0;
+    _mjpegParsedFrameCount = 0;
+    _mjpegSupersededFrameCount = 0;
+    _mjpegDecodedFrameCount = 0;
+    _mjpegVTDecodedFrameCount = 0;
+    _mjpegFallbackDecodedFrameCount = 0;
+    _mjpegDecodeFailureCount = 0;
+    _mjpegTotalDecodeSeconds = 0;
+    _mjpegLastStatisticsTime = CFAbsoluteTimeGetCurrent();
     self.imageData = [NSMutableData data];
     [self resetMJPEGReceiveBufferLocked];
     os_unfair_lock_unlock(&_mjpegReceiveLock);
@@ -476,6 +573,10 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     self.session = nil;
     self.delegateQueue = nil;
     os_unfair_lock_lock(&_mjpegReceiveLock);
+    _mjpegConnectionGeneration++;
+    _pendingMJPEGData = nil;
+    _pendingMJPEGWidth = 0;
+    _pendingMJPEGHeight = 0;
     self.imageData = nil;
     [self resetMJPEGReceiveBufferLocked];
     os_unfair_lock_unlock(&_mjpegReceiveLock);
@@ -526,24 +627,213 @@ didReceiveResponse:(NSURLResponse *)response
     completionHandler(NSURLSessionResponseAllow);
 }
 
-- (CVPixelBufferRef)copyPixelBufferFromJPEGData:(NSData *)jpegData CF_RETURNS_RETAINED {
+- (BOOL)prepareMJPEGDecompressionSessionForWidth:(size_t)width height:(size_t)height {
+    if (_mjpegDecompressionSession && _mjpegVideoFormatDescription &&
+        _mjpegDecoderWidth == width && _mjpegDecoderHeight == height) {
+        return YES;
+    }
+    [self releaseMJPEGDecompressionSession];
+    if ((_mjpegVTDisabledWidth == width && _mjpegVTDisabledHeight == height) ||
+        width == 0 || height == 0 || width > 4096 || height > 4096 ||
+        width * height > 16000000) {
+        return NO;
+    }
+
+    OSStatus formatStatus = CMVideoFormatDescriptionCreate(kCFAllocatorDefault,
+                                                            kCMVideoCodecType_JPEG,
+                                                            (int32_t)width,
+                                                            (int32_t)height,
+                                                            NULL,
+                                                            &_mjpegVideoFormatDescription);
+    if (formatStatus != noErr || !_mjpegVideoFormatDescription) {
+        _mjpegVTDisabledWidth = width;
+        _mjpegVTDisabledHeight = height;
+        return NO;
+    }
+
+    NSDictionary *decoderSpecification = @{
+        (__bridge NSString *)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder:
+            @YES,
+    };
+    NSDictionary *pixelBufferAttributes = @{
+        (id)kCVPixelBufferWidthKey: @(width),
+        (id)kCVPixelBufferHeightKey: @(height),
+        (id)kCVPixelBufferPixelFormatTypeKey:
+            @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange),
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{
+            (id)kIOSurfaceIsGlobal: @YES,
+        },
+        (id)kCVPixelBufferMetalCompatibilityKey: @YES,
+    };
+    VTDecompressionOutputCallbackRecord callbackRecord = {
+        .decompressionOutputCallback = VCMJPEGDecompressionOutputCallback,
+        .decompressionOutputRefCon = NULL,
+    };
+    OSStatus sessionStatus = VTDecompressionSessionCreate(
+        kCFAllocatorDefault,
+        _mjpegVideoFormatDescription,
+        (__bridge CFDictionaryRef)decoderSpecification,
+        (__bridge CFDictionaryRef)pixelBufferAttributes,
+        &callbackRecord,
+        &_mjpegDecompressionSession);
+    if (sessionStatus != noErr || !_mjpegDecompressionSession) {
+        [self releaseMJPEGDecompressionSession];
+        _mjpegVTDisabledWidth = width;
+        _mjpegVTDisabledHeight = height;
+        return NO;
+    }
+    VTSessionSetProperty(_mjpegDecompressionSession,
+                         kVTDecompressionPropertyKey_RealTime,
+                         kCFBooleanTrue);
+    CFTypeRef hardwareProperty = NULL;
+    OSStatus hardwareStatus = VTSessionCopyProperty(
+        _mjpegDecompressionSession,
+        kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+        kCFAllocatorDefault,
+        &hardwareProperty);
+    _mjpegVTUsesHardware = hardwareStatus == noErr && hardwareProperty &&
+        CFGetTypeID(hardwareProperty) == CFBooleanGetTypeID() &&
+        CFBooleanGetValue((CFBooleanRef)hardwareProperty);
+    if (hardwareProperty) CFRelease(hardwareProperty);
+    _mjpegDecoderWidth = width;
+    _mjpegDecoderHeight = height;
+    _mjpegVTDisabledWidth = 0;
+    _mjpegVTDisabledHeight = 0;
+    _mjpegVTConsecutiveFailures = 0;
+    NSLog(@"[VirtualCamPro] MJPEG VideoToolbox decoder ready: %zux%zu, hardware=%@",
+          width, height, _mjpegVTUsesHardware ? @"yes" : @"no");
+    return YES;
+}
+
+- (void)releaseMJPEGDecompressionSession {
+    if (_mjpegDecompressionSession) {
+        VTDecompressionSessionInvalidate(_mjpegDecompressionSession);
+        CFRelease(_mjpegDecompressionSession);
+        _mjpegDecompressionSession = NULL;
+    }
+    if (_mjpegVideoFormatDescription) {
+        CFRelease(_mjpegVideoFormatDescription);
+        _mjpegVideoFormatDescription = NULL;
+    }
+    _mjpegDecoderWidth = 0;
+    _mjpegDecoderHeight = 0;
+    _mjpegVTConsecutiveFailures = 0;
+    _mjpegVTUsesHardware = NO;
+}
+
+- (void)recordMJPEGVideoToolboxFailureForWidth:(size_t)width height:(size_t)height {
+    _mjpegVTConsecutiveFailures++;
+    if (_mjpegVTConsecutiveFailures < 3) return;
+    [self releaseMJPEGDecompressionSession];
+    _mjpegVTDisabledWidth = width;
+    _mjpegVTDisabledHeight = height;
+}
+
+- (CVPixelBufferRef)copyPixelBufferFromJPEGDataUsingVideoToolbox:(NSData *)jpegData
+                                                           width:(size_t)width
+                                                          height:(size_t)height CF_RETURNS_RETAINED {
+    if (![self prepareMJPEGDecompressionSessionForWidth:width height:height]) return NULL;
+
+    CMBlockBufferRef blockBuffer = NULL;
+    OSStatus blockStatus = CMBlockBufferCreateWithMemoryBlock(
+        kCFAllocatorDefault,
+        (void *)jpegData.bytes,
+        jpegData.length,
+        kCFAllocatorNull,
+        NULL,
+        0,
+        jpegData.length,
+        0,
+        &blockBuffer);
+    if (blockStatus != kCMBlockBufferNoErr || !blockBuffer) {
+        [self recordMJPEGVideoToolboxFailureForWidth:width height:height];
+        return NULL;
+    }
+
+    CMSampleBufferRef sampleBuffer = NULL;
+    size_t sampleSize = jpegData.length;
+    CMSampleTimingInfo timing = {
+        .duration = kCMTimeInvalid,
+        .presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000),
+        .decodeTimeStamp = kCMTimeInvalid,
+    };
+    OSStatus sampleStatus = CMSampleBufferCreateReady(kCFAllocatorDefault,
+                                                       blockBuffer,
+                                                       _mjpegVideoFormatDescription,
+                                                       1,
+                                                       1,
+                                                       &timing,
+                                                       1,
+                                                       &sampleSize,
+                                                       &sampleBuffer);
+    CFRelease(blockBuffer);
+    if (sampleStatus != noErr || !sampleBuffer) {
+        [self recordMJPEGVideoToolboxFailureForWidth:width height:height];
+        return NULL;
+    }
+
+    VCMJPEGDecodeContext context = {
+        .pixelBuffer = NULL,
+        .status = noErr,
+        .infoFlags = 0,
+    };
+    VTDecodeInfoFlags decodeFlags = 0;
+    OSStatus decodeStatus = VTDecompressionSessionDecodeFrame(_mjpegDecompressionSession,
+                                                               sampleBuffer,
+                                                               0,
+                                                               &context,
+                                                               &decodeFlags);
+    CFRelease(sampleBuffer);
+    BOOL succeeded = decodeStatus == noErr && context.status == noErr &&
+        context.pixelBuffer && !(decodeFlags & kVTDecodeInfo_FrameDropped) &&
+        !(context.infoFlags & kVTDecodeInfo_FrameDropped);
+    if (succeeded) {
+        _mjpegVTConsecutiveFailures = 0;
+        return context.pixelBuffer;
+    }
+    if (context.pixelBuffer) CVPixelBufferRelease(context.pixelBuffer);
+    [self recordMJPEGVideoToolboxFailureForWidth:width height:height];
+    return NULL;
+}
+
+- (CVPixelBufferRef)copyPixelBufferFromJPEGDataUsingImageIO:(NSData *)jpegData
+                                                      width:(size_t)declaredWidth
+                                                     height:(size_t)declaredHeight CF_RETURNS_RETAINED {
+    if (declaredWidth > 4096 || declaredHeight > 4096 ||
+        (declaredWidth > 0 && declaredHeight > 0 &&
+         declaredWidth * declaredHeight > 16000000)) {
+        return NULL;
+    }
     CGImageSourceRef imageSource = CGImageSourceCreateWithData((__bridge CFDataRef)jpegData, NULL);
     if (!imageSource) return NULL;
+    if (declaredWidth == 0 || declaredHeight == 0) {
+        NSDictionary *properties = CFBridgingRelease(
+            CGImageSourceCopyPropertiesAtIndex(imageSource, 0, NULL));
+        declaredWidth = [properties[(id)kCGImagePropertyPixelWidth] unsignedIntegerValue];
+        declaredHeight = [properties[(id)kCGImagePropertyPixelHeight] unsignedIntegerValue];
+    }
+    if (declaredWidth == 0 || declaredHeight == 0 || declaredWidth > 4096 ||
+        declaredHeight > 4096 || declaredWidth * declaredHeight > 16000000) {
+        CFRelease(imageSource);
+        return NULL;
+    }
     NSDictionary *decodeOptions = @{
-        (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
-        (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
-        (id)kCGImageSourceThumbnailMaxPixelSize: @(MAX(1280, MIN(3840, self.maximumPixelDimension))),
         (id)kCGImageSourceShouldCacheImmediately: @YES,
     };
-    CGImageRef cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource,
-                                                              0,
-                                                              (__bridge CFDictionaryRef)decodeOptions);
+    // Decode the sender's pixels at the sender's dimensions. In particular, do
+    // not apply EXIF orientation or a phone-side thumbnail quality cap.
+    CGImageRef cgImage = CGImageSourceCreateImageAtIndex(
+        imageSource, 0, (__bridge CFDictionaryRef)decodeOptions);
     CFRelease(imageSource);
     if (!cgImage) return NULL;
 
     size_t width = CGImageGetWidth(cgImage);
     size_t height = CGImageGetHeight(cgImage);
     if (width == 0 || height == 0 || width > 4096 || height > 4096 || width * height > 16000000) {
+        CGImageRelease(cgImage);
+        return NULL;
+    }
+    if (width != declaredWidth || height != declaredHeight) {
         CGImageRelease(cgImage);
         return NULL;
     }
@@ -595,6 +885,27 @@ didReceiveResponse:(NSURLResponse *)response
     return pixelBuffer;
 }
 
+- (CVPixelBufferRef)copyPixelBufferFromJPEGData:(NSData *)jpegData
+                                          width:(size_t)width
+                                         height:(size_t)height
+                         usedVideoToolbox:(BOOL *)usedVideoToolbox CF_RETURNS_RETAINED {
+    if (usedVideoToolbox) *usedVideoToolbox = NO;
+    if (!jpegData || jpegData.length == 0) return NULL;
+    if (width > 0 && height > 0) {
+        CVPixelBufferRef hardwareBuffer =
+            [self copyPixelBufferFromJPEGDataUsingVideoToolbox:jpegData
+                                                         width:width
+                                                        height:height];
+        if (hardwareBuffer) {
+            if (usedVideoToolbox) *usedVideoToolbox = YES;
+            return hardwareBuffer;
+        }
+    }
+    return [self copyPixelBufferFromJPEGDataUsingImageIO:jpegData
+                                                   width:width
+                                                  height:height];
+}
+
 - (CVPixelBufferPoolRef)mjpegPixelBufferPoolForWidth:(size_t)width
                                               height:(size_t)height {
     if (_mjpegPixelBufferPool && _mjpegPoolWidth == width && _mjpegPoolHeight == height) {
@@ -617,7 +928,9 @@ didReceiveResponse:(NSURLResponse *)response
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
         (id)kCVPixelBufferCGImageCompatibilityKey: @YES,
         (id)kCVPixelBufferCGBitmapContextCompatibilityKey: @YES,
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{
+            (id)kIOSurfaceIsGlobal: @YES,
+        },
         (id)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
     CVReturn result = CVPixelBufferPoolCreate(kCFAllocatorDefault,
@@ -666,7 +979,6 @@ didReceiveResponse:(NSURLResponse *)response
           dataTask:(NSURLSessionDataTask *)dataTask
     didReceiveData:(NSData *)data {
     if (session != self.session || dataTask != self.task || !self.running || data.length == 0) return;
-    CVPixelBufferRef pixelBuffer = NULL;
     os_unfair_lock_lock(&_mjpegReceiveLock);
     if (session != self.session || dataTask != self.task || !self.running) {
         os_unfair_lock_unlock(&_mjpegReceiveLock);
@@ -698,11 +1010,9 @@ didReceiveResponse:(NSURLResponse *)response
     }
     [imageData appendData:data];
 
-    CFAbsoluteTime decodeWindowTime = CFAbsoluteTimeGetCurrent();
-    NSTimeInterval minimumInterval = 1.0 / MAX(1, self.preferredFPS);
-    BOOL decodeWindowOpen = _lastMJPEGDecodeTime <= 0 ||
-        decodeWindowTime - _lastMJPEGDecodeTime >= minimumInterval * 0.85;
     NSData *latestJPEGData = nil;
+    size_t latestJPEGWidth = 0;
+    size_t latestJPEGHeight = 0;
 
     static NSData *startMarker;
     static dispatch_once_t markerToken;
@@ -760,36 +1070,134 @@ didReceiveResponse:(NSURLResponse *)response
         // jitter or temporary decoder pressure. Keep only the newest complete
         // JPEG in this callback so recovery catches up instead of displaying a
         // stale backlog frame-by-frame.
-        if (decodeWindowOpen) {
-            latestJPEGData = [imageData subdataWithRange:NSMakeRange(_mjpegBufferOffset,
-                                                                     imageLength)];
-        }
+        if (latestJPEGData) _mjpegSupersededFrameCount++;
+        latestJPEGData = [imageData subdataWithRange:NSMakeRange(_mjpegBufferOffset,
+                                                                 imageLength)];
+        latestJPEGWidth = _mjpegParserState.sawFrameDimensions
+            ? _mjpegParserState.width : 0;
+        latestJPEGHeight = _mjpegParserState.sawFrameDimensions
+            ? _mjpegParserState.height : 0;
+        _mjpegParsedFrameCount++;
         _mjpegBufferOffset += imageLength;
         VCJPEGParserReset(&_mjpegParserState);
         [self compactMJPEGReceiveBufferLockedIfNeeded:NO];
     }
 
     if (latestJPEGData) {
-        _lastMJPEGDecodeTime = CFAbsoluteTimeGetCurrent();
-        pixelBuffer = [self copyPixelBufferFromJPEGData:latestJPEGData];
-        if (!pixelBuffer) {
-            [self reportMalformedMJPEGStream:@"MJPEG JPEG decoding failed"];
+        if (_pendingMJPEGData) _mjpegSupersededFrameCount++;
+        _pendingMJPEGData = latestJPEGData;
+        _pendingMJPEGWidth = latestJPEGWidth;
+        _pendingMJPEGHeight = latestJPEGHeight;
+        _pendingMJPEGConnectionGeneration = _mjpegConnectionGeneration;
+        if (!_mjpegDecodeScheduled) {
+            _mjpegDecodeScheduled = YES;
+            dispatch_async(self.mjpegDecodeQueue, ^{ [self decodePendingMJPEGFrames]; });
         }
     }
     os_unfair_lock_unlock(&_mjpegReceiveLock);
+}
 
-    if (pixelBuffer) {
-        if (session == self.session && dataTask == self.task && self.running) {
-            [self deliverPixelBuffer:pixelBuffer];
+- (void)decodePendingMJPEGFrames {
+    while (YES) {
+        NSData *jpegData = nil;
+        size_t width = 0;
+        size_t height = 0;
+        NSUInteger connectionGeneration = 0;
+        os_unfair_lock_lock(&_mjpegReceiveLock);
+        jpegData = _pendingMJPEGData;
+        width = _pendingMJPEGWidth;
+        height = _pendingMJPEGHeight;
+        connectionGeneration = _pendingMJPEGConnectionGeneration;
+        _pendingMJPEGData = nil;
+        _pendingMJPEGWidth = 0;
+        _pendingMJPEGHeight = 0;
+        if (!jpegData) {
+            _mjpegDecodeScheduled = NO;
+            os_unfair_lock_unlock(&_mjpegReceiveLock);
+            return;
         }
-        CVPixelBufferRelease(pixelBuffer);
+        os_unfair_lock_unlock(&_mjpegReceiveLock);
+
+        @autoreleasepool {
+            CFTimeInterval decodeStartedAt = CACurrentMediaTime();
+            BOOL usedVideoToolbox = NO;
+            CVPixelBufferRef pixelBuffer = [self copyPixelBufferFromJPEGData:jpegData
+                                                                        width:width
+                                                                       height:height
+                                                       usedVideoToolbox:&usedVideoToolbox];
+            CFTimeInterval decodeSeconds = CACurrentMediaTime() - decodeStartedAt;
+            BOOL reportStatistics = NO;
+            uint64_t parsedFrames = 0;
+            uint64_t decodedFrames = 0;
+            uint64_t supersededFrames = 0;
+            uint64_t vtFrames = 0;
+            uint64_t fallbackFrames = 0;
+            uint64_t failedFrames = 0;
+            CFTimeInterval totalDecodeSeconds = 0;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            os_unfair_lock_lock(&_mjpegReceiveLock);
+            BOOL currentGeneration = connectionGeneration == _mjpegConnectionGeneration;
+            if (currentGeneration) {
+                _mjpegTotalDecodeSeconds += decodeSeconds;
+                if (pixelBuffer) {
+                    _mjpegDecodedFrameCount++;
+                    if (usedVideoToolbox) {
+                        _mjpegVTDecodedFrameCount++;
+                    } else {
+                        _mjpegFallbackDecodedFrameCount++;
+                    }
+                } else {
+                    _mjpegDecodeFailureCount++;
+                }
+            }
+            if (currentGeneration &&
+                now - _mjpegLastStatisticsTime >= VCMJPEGStatisticsInterval) {
+                _mjpegLastStatisticsTime = now;
+                parsedFrames = _mjpegParsedFrameCount;
+                decodedFrames = _mjpegDecodedFrameCount;
+                supersededFrames = _mjpegSupersededFrameCount;
+                vtFrames = _mjpegVTDecodedFrameCount;
+                fallbackFrames = _mjpegFallbackDecodedFrameCount;
+                failedFrames = _mjpegDecodeFailureCount;
+                totalDecodeSeconds = _mjpegTotalDecodeSeconds;
+                reportStatistics = parsedFrames > 0;
+            }
+            os_unfair_lock_unlock(&_mjpegReceiveLock);
+            if (reportStatistics) {
+                double averageDecodeMilliseconds = decodedFrames + failedFrames > 0
+                    ? (totalDecodeSeconds * 1000.0) / (double)(decodedFrames + failedFrames)
+                    : 0;
+                NSLog(@"[VirtualCamPro] MJPEG health: parsed=%llu decoded=%llu "
+                       "latest-dropped=%llu decode-failed=%llu vt=%llu imageio=%llu "
+                       "average-decode=%.2fms",
+                      (unsigned long long)parsedFrames,
+                      (unsigned long long)decodedFrames,
+                      (unsigned long long)supersededFrames,
+                      (unsigned long long)failedFrames,
+                      (unsigned long long)vtFrames,
+                      (unsigned long long)fallbackFrames,
+                      averageDecodeMilliseconds);
+            }
+            if (!pixelBuffer) {
+                [self reportMalformedMJPEGStream:@"MJPEG JPEG decoding failed"];
+                continue;
+            }
+            os_unfair_lock_lock(&_mjpegReceiveLock);
+            BOOL current = connectionGeneration == _mjpegConnectionGeneration;
+            os_unfair_lock_unlock(&_mjpegReceiveLock);
+            if (current && self.running) [self deliverPixelBuffer:pixelBuffer];
+            CVPixelBufferRelease(pixelBuffer);
+        }
     }
 }
 
 - (void)reportMalformedMJPEGStream:(NSString *)description {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (_lastMJPEGErrorReportTime > 0 && now - _lastMJPEGErrorReportTime < 30.0) return;
-    _lastMJPEGErrorReportTime = now;
+    @synchronized (self) {
+        if (_lastMJPEGErrorReportTime > 0 &&
+            now - _lastMJPEGErrorReportTime < 30.0) return;
+        _lastMJPEGErrorReportTime = now;
+    }
     NSError *error = [NSError errorWithDomain:VCStreamErrorDomain
                                      code:1006
                                  userInfo:@{NSLocalizedDescriptionKey: description}];
@@ -832,6 +1240,7 @@ didCompleteWithError:(NSError *)error {
     if (self.healthTimer) dispatch_source_cancel(self.healthTimer);
     [self.task cancel];
     [self.session invalidateAndCancel];
+    [self releaseMJPEGDecompressionSession];
     [self releaseMJPEGPixelBufferPool];
 }
 

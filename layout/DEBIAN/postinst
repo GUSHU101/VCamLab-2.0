@@ -1,11 +1,12 @@
 #!/bin/sh
 
 if [ "${1:-}" = "configure" ] && command -v killall >/dev/null 2>&1; then
-    # launchd restarts mediaserverd. Closing Camera/Preferences makes the new
-    # dylibs and preference bundle visible without a full userspace reboot.
+    # launchd restarts mediaserverd. SpringBoard must reload the in-process
+    # media producer; Camera/Preferences reload the client and preference UI.
     killall mediaserverd 2>/dev/null || true
     killall Camera 2>/dev/null || true
     killall Preferences 2>/dev/null || true
+    killall SpringBoard 2>/dev/null || true
 fi
 
 exit 0

@@ -170,7 +170,7 @@ function Invoke-GuiSelfTest {
     }
     $testCommand = New-GuiInstallerCommand -Mode "Setup" -HostName "192.168.0.103" `
         -Port 22 -FPS 60 -Transport "hls" `
-        -PackagePath "C:\build\com.murkaska.virtualcampro_2.8.0_iphoneos-arm64.deb" `
+        -PackagePath "C:\build\com.murkaska.virtualcampro_2.10.0_iphoneos-arm64.deb" `
         -StreamURL "" -LogPath "C:\logs\deploy.log"
     foreach ($fragment in @("-Mode 'Setup'", "-PhoneHost '192.168.0.103'", "-PreferredFPS '60'",
             "-Transport 'hls'", "-LogPath 'C:\logs\deploy.log'")) {
@@ -594,7 +594,7 @@ $configPanel.Controls.Add($script:BrowseButton)
 $script:PackageSummary = New-GuiLabel -Text "正在查找安装包…" -X 20 -Y 171 -Width 565 -Height 23 -Font $fontSmall -Color $colorMuted
 $configPanel.Controls.Add($script:PackageSummary)
 
-$configPanel.Controls.Add((New-GuiLabel -Text "手机解码 FPS 目标" -X 20 -Y 202 -Width 200 -Height 21 -Color $colorMuted))
+$configPanel.Controls.Add((New-GuiLabel -Text "手机本地视频最高 FPS" -X 20 -Y 202 -Width 200 -Height 21 -Color $colorMuted))
 $script:FpsBox = New-Object Windows.Forms.NumericUpDown
 $script:FpsBox.Location = New-Object Drawing.Point(20, 225)
 $script:FpsBox.Size = New-Object Drawing.Size(125, 28)

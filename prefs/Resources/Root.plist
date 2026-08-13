@@ -5,231 +5,188 @@
     <key>items</key>
     <array>
         <dict>
-            <key>cell</key>
-            <string>PSGroupCell</string>
-            <key>label</key>
-            <string>VirtualCamPro</string>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>VirtualCamPro</string>
             <key>footerText</key>
-            <string>支持 HLS（.m3u8）和 MJPEG（HTTP/HTTPS）。方向或镜像只在手机与 OBS 其中一端设置，避免重复变换。手机解码目标支持 1–240 FPS，屏幕预览仍受设备物理刷新率限制；1920 适合 iPhone 7 Plus。</string>
+            <string>网络流严格采用发送端的像素方向、分辨率、质量和帧率，不在手机上再次旋转、镜像、限帧或降质；网络流始终保留手机原生麦克风。</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSSwitchCell</string>
-            <key>default</key>
-            <false/>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>enabled</string>
-            <key>label</key>
-            <string>启用画面替换</string>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>default</key><false/>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>enabled</string>
+            <key>label</key><string>启用系统摄像头替换</string>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSSwitchCell</string>
-            <key>default</key>
-            <false/>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>compatibilityMode</string>
-            <key>label</key>
-            <string>应用层兼容模式</string>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
-        </dict>
-        <dict>
-            <key>cell</key>
-            <string>PSEditTextCell</string>
-            <key>default</key>
-            <string></string>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>streamURL</string>
-            <key>label</key>
-            <string>网络流 URL</string>
-            <key>placeholder</key>
-            <string>http://192.168.1.10:8888/live.mjpg</string>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
-        </dict>
-        <dict>
-            <key>cell</key>
-            <string>PSButtonCell</string>
-            <key>label</key>
-            <string>检测当前网络流</string>
-            <key>action</key>
-            <string>testStreamConnection:</string>
-        </dict>
-        <dict>
-            <key>cell</key>
-            <string>PSSliderCell</string>
-            <key>default</key>
-            <integer>60</integer>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>preferredFPS</string>
-            <key>label</key>
-            <string>手机解码 FPS 目标</string>
-            <key>min</key>
-            <integer>1</integer>
-            <key>max</key>
-            <integer>240</integer>
-            <key>showValue</key>
-            <true/>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
-        </dict>
-        <dict>
-            <key>cell</key>
-            <string>PSLinkListCell</string>
-            <key>default</key>
-            <integer>0</integer>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>sourceRotation</string>
-            <key>label</key>
-            <string>输入画面旋转</string>
+            <key>cell</key><string>PSLinkListCell</string>
+            <key>default</key><integer>0</integer>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>sourceType</string>
+            <key>label</key><string>替换来源</string>
             <key>validTitles</key>
             <array>
-                <string>不旋转</string>
-                <string>顺时针 90°</string>
-                <string>旋转 180°</string>
-                <string>逆时针 90°</string>
+                <string>网络 HLS / MJPEG</string>
+                <string>设备屏幕实时镜像</string>
+                <string>手机本地视频 / 音频</string>
             </array>
             <key>validValues</key>
-            <array>
-                <integer>0</integer>
-                <integer>90</integer>
-                <integer>180</integer>
-                <integer>270</integer>
-            </array>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <array><integer>0</integer><integer>1</integer><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>网络流</string>
+            <key>vcSourceTypes</key><array><integer>0</integer></array>
+            <key>footerText</key><string>推荐使用 MJPEG 获得最低延迟。手机只解码发送端完整帧，所有画面参数由 Windows/OBS 发送端决定。</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSSwitchCell</string>
-            <key>default</key>
-            <false/>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>mirrorSource</string>
-            <key>label</key>
-            <string>水平镜像输入</string>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <key>cell</key><string>PSEditTextCell</string>
+            <key>default</key><string></string>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>streamURL</string>
+            <key>label</key><string>网络流 URL</string>
+            <key>placeholder</key><string>http://192.168.1.10:8888/live.mjpg</string>
+            <key>vcSourceTypes</key><array><integer>0</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSLinkListCell</string>
-            <key>default</key>
-            <integer>1920</integer>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>maximumPixelDimension</string>
-            <key>label</key>
-            <string>MJPEG 解码上限</string>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>检测当前网络流</string>
+            <key>action</key><string>testStreamConnection:</string>
+            <key>vcSourceTypes</key><array><integer>0</integer></array>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>屏幕镜像</string>
+            <key>vcSourceTypes</key><array><integer>1</integer></array>
+            <key>footerText</key><string>屏幕来源按设备显示方向和系统刷新节奏直接输出，不使用本地视频的旋转、镜像、质量或帧率设置。</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>手机本地媒体</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>footerText</key><string>以下画面设置仅作用于手机本地视频。播放期间按音量加键切换到同目录下一段视频，按音量减键切换到上一段；存在可切换视频时按键由播放列表接管。</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSEditTextCell</string>
+            <key>default</key><string></string>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>localMediaPath</string>
+            <key>label</key><string>本地媒体路径</string>
+            <key>placeholder</key><string>/var/mobile/Media/VirtualCam/demo.mp4</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>default</key><true/>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>loopLocalMedia</string>
+            <key>label</key><string>循环播放当前本地媒体</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSSliderCell</string>
+            <key>default</key><integer>60</integer>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>preferredFPS</string>
+            <key>label</key><string>本地视频最高 FPS</string>
+            <key>min</key><integer>1</integer>
+            <key>max</key><integer>240</integer>
+            <key>showValue</key><true/>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSLinkListCell</string>
+            <key>default</key><integer>1920</integer>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>maximumPixelDimension</string>
+            <key>label</key><string>本地视频解码质量</string>
             <key>validTitles</key>
             <array>
-                <string>1280（省电）</string>
-                <string>1920（推荐）</string>
-                <string>2560（高清）</string>
-                <string>3840（实验性）</string>
+                <string>1280（省电）</string><string>1920（推荐）</string>
+                <string>2560（高清）</string><string>3840（超清）</string>
             </array>
             <key>validValues</key>
-            <array>
-                <integer>1280</integer>
-                <integer>1920</integer>
-                <integer>2560</integer>
-                <integer>3840</integer>
-            </array>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <array><integer>1280</integer><integer>1920</integer><integer>2560</integer><integer>3840</integer></array>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSSliderCell</string>
-            <key>default</key>
-            <real>1.0</real>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>jpegQuality</string>
-            <key>label</key>
-            <string>照片 JPEG 质量</string>
-            <key>min</key>
-            <real>0.5</real>
-            <key>max</key>
-            <real>1.0</real>
-            <key>showValue</key>
-            <true/>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <key>cell</key><string>PSLinkListCell</string>
+            <key>default</key><integer>0</integer>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>sourceRotation</string>
+            <key>label</key><string>本地视频旋转</string>
+            <key>validTitles</key>
+            <array><string>不旋转</string><string>顺时针 90°</string><string>旋转 180°</string><string>逆时针 90°</string></array>
+            <key>validValues</key>
+            <array><integer>0</integer><integer>90</integer><integer>180</integer><integer>270</integer></array>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSSwitchCell</string>
-            <key>default</key>
-            <true/>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>aspectFill</string>
-            <key>label</key>
-            <string>填满画面（可能裁切）</string>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>default</key><false/>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>mirrorSource</string>
+            <key>label</key><string>水平镜像本地视频</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSSwitchCell</string>
-            <key>default</key>
-            <true/>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>holdLastFrame</string>
-            <key>label</key>
-            <string>断流后保持最后一帧</string>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>default</key><true/>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>aspectFill</string>
+            <key>label</key><string>本地视频填满画面</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSSliderCell</string>
-            <key>default</key>
-            <real>8.0</real>
-            <key>defaults</key>
-            <string>com.murkaska.virtualcampro</string>
-            <key>key</key>
-            <string>staleFrameTimeout</string>
-            <key>label</key>
-            <string>旧帧超时（秒）</string>
-            <key>min</key>
-            <real>2.0</real>
-            <key>max</key>
-            <real>30.0</real>
-            <key>showValue</key>
-            <true/>
-            <key>PostNotification</key>
-            <string>com.murkaska.virtualcampro/preferences.changed</string>
+            <key>cell</key><string>PSSliderCell</string>
+            <key>default</key><real>1.0</real>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>jpegQuality</string>
+            <key>label</key><string>本地画面拍照 JPEG 质量</string>
+            <key>min</key><real>0.5</real>
+            <key>max</key><real>1.0</real>
+            <key>showValue</key><true/>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>稳定性</string>
+            <key>footerText</key><string>断流保护仅决定替换帧过期后的行为；任何解码或私有节点失败都保持原相机/麦克风路径。</string>
         </dict>
         <dict>
-            <key>cell</key>
-            <string>PSGroupCell</string>
-            <key>footerText</key>
-            <string>默认系统管线用于照片、录像、慢动作、延时摄影和第三方相机。应用层兼容模式仅作为公共 AVFoundation/WebKit 回退，不能覆盖所有 AVCaptureMovieFileOutput 或 MetadataOutput 用法。插件替换已有前/后摄画面，不会注册名为 OBS 的新相机。切换模式后请完全退出并重新打开目标应用或浏览器。</string>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>default</key><true/>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>holdLastFrame</string>
+            <key>label</key><string>断流后保持最后一帧</string>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSSliderCell</string>
+            <key>default</key><real>8.0</real>
+            <key>defaults</key><string>com.murkaska.virtualcampro</string>
+            <key>key</key><string>staleFrameTimeout</string>
+            <key>label</key><string>旧帧超时（秒）</string>
+            <key>min</key><real>2.0</real>
+            <key>max</key><real>30.0</real>
+            <key>showValue</key><true/>
+            <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
     </array>
-    <key>title</key>
-    <string>VirtualCamPro</string>
+    <key>title</key><string>VirtualCamPro</string>
 </dict>
 </plist>

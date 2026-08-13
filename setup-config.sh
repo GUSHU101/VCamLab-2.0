@@ -104,8 +104,8 @@ cat > "$TEMP_PREF_PATH" <<EOF
 <dict>
     <key>enabled</key>
     <true/>
-    <key>compatibilityMode</key>
-    <false/>
+    <key>sourceType</key>
+    <integer>0</integer>
     <key>streamURL</key>
     <string>${ESCAPED_URL}</string>
     <key>preferredFPS</key>
@@ -143,5 +143,5 @@ if command -v notifyutil >/dev/null 2>&1; then
 fi
 
 echo "Saved VirtualCamPro configuration to $PREF_PATH"
-echo "Phone decode FPS target: $PREFERRED_FPS"
+echo "Local-file FPS limit: $PREFERRED_FPS (network streams follow the sender)"
 echo "Restart Camera and mediaserverd if they do not reload automatically."

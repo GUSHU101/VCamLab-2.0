@@ -4,10 +4,12 @@
 
 Windows 无法直接使用 Xcode 的新 arm64e ABI 链接器，因此完整的 `arm64 + arm64e` rootless 构建应在 macOS 或本仓库的 GitHub Actions 上完成。
 
-1. 将分支推送到你自己的 GitHub 仓库。
-2. 打开 Actions，运行 `Build rootless package`。
-3. 下载 `VirtualCamPro-rootless` artifact。
-4. 解压后得到 `.deb`。
+1. 推送到 `main` 或创建面向 `main` 的 Pull Request；也可在 Actions 手动运行 `Build rootless package`。
+2. Actions 会安装固定提交的 Theos/iOS SDK，编译 `arm64 + arm64e`，再核对包 ID、版本、架构、rootless 文件布局、Mach-O、plist、维护脚本权限和 SHA-256。
+3. 构建成功后下载 `VirtualCamPro-rootless` artifact。
+4. 解压后得到 `.deb`、`SHA256SUMS` 和记录源码/Theos/SDK 提交的 `build-metadata.txt`。
+
+`Source validation` 会同时运行带 ASan/UBSan 的 C 协议测试、Shell 配置自检、PowerShell 5.1/WinForms/FFmpeg 深度自检，并重建不捆绑旧 iOS 二进制的 Windows 独立工具。所有第三方 Actions 都固定到完整提交 SHA，工作流只授予 `contents: read`。
 
 ## macOS 本地构建
 
@@ -18,6 +20,7 @@ export THEOS="$HOME/theos"
 make clean
 python3 scripts/validate_project.py
 make package FINALPACKAGE=1
+bash scripts/verify_deb.sh packages/com.murkaska.virtualcampro_2.10.0_iphoneos-arm64.deb
 ```
 
 仅为 iPhone 7 Plus/A10 构建时，可临时减少到 arm64：
@@ -31,11 +34,11 @@ make package FINALPACKAGE=1 ARCHS=arm64
 
 ## 生成 Windows 独立配套工具
 
-仓库已经在 `VirtualCamPro-Windows-Control-Center/` 单独保存可直接使用的最新版控制中心和正式 `.deb`。需要从新构建包重新生成交付目录时，在 Windows 完整源码目录执行：
+仓库在 `VirtualCamPro-Windows-Control-Center/` 保存控制中心和旧版正式 `.deb`。统一系统管线属于当前源码改动，必须先由 GitHub Actions/macOS 重新构建，再从新包生成交付目录：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-windows-standalone.ps1 `
-  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.8.0_iphoneos-arm64.deb" `
+  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.10.0_iphoneos-arm64.deb" `
   -CreateZip
 ```
 
@@ -65,12 +68,12 @@ install-phone.bat PHONE_IP
 install-phone.bat --setup PHONE_IP
 ```
 
-`--setup` 会推导电脑访问该手机时使用的局域网 IPv4，写入 `http://电脑IP:8888/live.mjpg`、启用替换并默认设置 60 FPS 手机解码目标。可通过 `VCAM_STREAM_URL`、`VCAM_PORT`、`VCAM_PHONE_FPS` 在 1–240 FPS 范围覆盖；只安装而不改变已有手机设置时使用普通安装命令。
+`--setup` 会推导电脑访问该手机时使用的局域网 IPv4，写入 `http://电脑IP:8888/live.mjpg` 并启用替换。`VCAM_PHONE_FPS` 保存的是手机本地文件的最高 FPS（默认 60），不会限制网络流；网络分辨率、FPS、质量和方向由发送端决定。只安装而不改变已有手机设置时使用普通安装命令。
 
 也可以把 `.deb` 完整路径作为第二个参数、SSH 端口作为第三个参数：
 
 ```bat
-install-phone.bat PHONE_IP "D:\Downloads\com.murkaska.virtualcampro_2.8.0_iphoneos-arm64.deb" 22
+install-phone.bat PHONE_IP "D:\Downloads\com.murkaska.virtualcampro_2.10.0_iphoneos-arm64.deb" 22
 ```
 
 工具固定使用 Windows OpenSSH 的交互式密码提示，不接收或保存密码。复制后还会核对上传字节数，并用手机端 `dpkg-deb` 验证包内 ID、版本和架构；安装后要求已安装版本精确一致，随后删除 `/var/mobile` 中的临时上传。默认用户是 `mobile`；可通过 `VCAM_PHONE_USER`、`VCAM_PHONE_PORT`、`VCAM_PHONE_HOST` 和 `VCAM_DEB_PATH` 环境变量覆盖。
@@ -92,12 +95,13 @@ dpkg -s com.murkaska.virtualcampro | grep -E '^(Status|Version|Architecture):'
 
 `command -v sudo` 或文件存在并不等于提权可用，安装前必须以 `sudo -v` 的退出结果为准。若出现“有效用户 ID 不是 0”或 `nosuid`，不要反复输入密码、修改 setuid 位或强制安装；完整重启后用原工具重新激活同一种 rootless 越狱，再重新执行 `--check`。
 
-包内 `postinst` 会在安装成功后自动重启 `mediaserverd`、相机和设置进程。若包管理器报告已安装但旧进程仍在，可手动执行：
+包内 `postinst` 会在安装成功后自动重启 SpringBoard、`mediaserverd`、相机和设置进程。若包管理器报告已安装但旧进程仍在，可手动执行：
 
 ```bash
 sudo killall mediaserverd
 sudo killall Camera 2>/dev/null || true
 sudo killall Preferences 2>/dev/null || true
+sudo killall SpringBoard
 ```
 
 也可以在 Sileo、Zebra 或 Filza 中打开 `.deb` 安装。rootless 文件应出现在：
@@ -116,6 +120,7 @@ sudo killall Preferences 2>/dev/null || true
 sudo mv /var/jb/Library/MobileSubstrate/DynamicLibraries/VCMediaServer.dylib /var/jb/Library/MobileSubstrate/DynamicLibraries/VCMediaServer.dylib.disabled
 sudo mv /var/jb/Library/MobileSubstrate/DynamicLibraries/AVFCameraSupport.dylib /var/jb/Library/MobileSubstrate/DynamicLibraries/AVFCameraSupport.dylib.disabled
 sudo killall mediaserverd
+sudo killall SpringBoard
 ```
 
 恢复时改回原文件名。完全卸载：

@@ -167,24 +167,24 @@ function Get-VcamAdaptiveQueueSettings {
         [Parameter(Mandatory = $true)][int]$PacketQueueMinimum,
         [Parameter(Mandatory = $true)][int]$NetworkQueueMinimum
     )
-    # At high source rates, preserve at least half a second before encoding and
-    # one second after encoding. These are buffer floors, never FPS/quality caps.
+    # Absorb ordinary scheduler/Wi-Fi bursts without turning the bridge into a
+    # seconds-long stale-frame queue. The FIFO still drops the oldest overflow
+    # under sustained backpressure, preserving real-time recovery.
     $packetQueue = [Math]::Max(
         $PacketQueueMinimum,
-        [Math]::Min(256, [int][Math]::Ceiling($FPS * 0.5))
+        [Math]::Min(60, [int][Math]::Ceiling($FPS * 0.25))
     )
     $networkQueue = [Math]::Max(
         $NetworkQueueMinimum,
-        [Math]::Min(600, [int][Math]::Ceiling($FPS))
+        [Math]::Min(36, [int][Math]::Ceiling($FPS * 0.15))
     )
-    # Two bytes per pixel is conservative for OBS's NV12/YUV420P/YUYV modes;
-    # multiplied by half a second, the factor simplifies to one byte per pixel.
-    $rawHalfSecondMiB = [Math]::Ceiling(
-        ([double]$Width * [double]$Height * $FPS) / 1MB
+    # Roughly 250 ms at two bytes/pixel, capped to avoid a hidden long queue.
+    $rawBurstMiB = [Math]::Ceiling(
+        ([double]$Width * [double]$Height * $FPS * 0.50) / 1MB
     )
     $realtimeBuffer = [Math]::Max(
         $RealtimeBufferMinimum,
-        [Math]::Min(1024, [int]$rawHalfSecondMiB)
+        [Math]::Min(256, [int]$rawBurstMiB)
     )
     return [pscustomobject]@{
         RealtimeBuffer = [int]$realtimeBuffer
@@ -629,6 +629,134 @@ function Test-VcamFfmpegEncoder {
     return (($listing -join "`n") -match ("(?im)^\s*V\S*\s+{0}\s" -f [regex]::Escape($Encoder)))
 }
 
+function Measure-VcamMjpegEncoderCapacity {
+    param(
+        [Parameter(Mandatory = $true)][string]$Ffmpeg,
+        [Parameter(Mandatory = $true)][ValidateSet("mjpeg", "mjpeg_qsv")][string]$Encoder,
+        [Parameter(Mandatory = $true)][int]$Width,
+        [Parameter(Mandatory = $true)][int]$Height,
+        [Parameter(Mandatory = $true)][double]$FPS,
+        [Parameter(Mandatory = $true)][int]$Quality,
+        [Parameter(Mandatory = $true)][int]$Threads,
+        [ValidateSet("optimal", "default")][string]$Huffman = "optimal"
+    )
+    # Benchmark the complete system-memory upload/encode path. Encoder listing
+    # alone is insufficient: FFmpeg builds often expose QSV on machines whose
+    # active driver cannot create a hardware session.
+    $frameCount = [Math]::Max(30, [Math]::Min(180, [int][Math]::Ceiling($FPS * 1.5)))
+    $rateText = Format-VcamFrameRate -Value $FPS
+    $encoderArguments = if ($Encoder -eq "mjpeg_qsv") {
+        @("-c:v", "mjpeg_qsv", "-pix_fmt", "nv12", "-global_quality", [string]$Quality,
+          "-async_depth", "4")
+    } else {
+        @("-c:v", "mjpeg", "-threads", [string]$Threads, "-pix_fmt", "yuvj420p",
+          "-q:v", [string]$Quality, "-huffman", $Huffman)
+    }
+    $arguments = @(
+        "-hide_banner", "-loglevel", "info",
+        "-f", "lavfi", "-i", ("testsrc2=size={0}x{1}:rate={2}" -f $Width, $Height, $rateText),
+        "-frames:v", [string]$frameCount, "-an"
+    ) + $encoderArguments + @("-f", "null", "-")
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Ffmpeg
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.Arguments = (($arguments | ForEach-Object {
+        if ($_ -match '[\s"]') { '"{0}"' -f ($_ -replace '"', '\"') } else { $_ }
+    }) -join ' ')
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw "process did not start" }
+        $standardError = $process.StandardError.ReadToEnd()
+        $null = $process.StandardOutput.ReadToEnd()
+        $process.WaitForExit()
+        $stopwatch.Stop()
+        $exitCode = $process.ExitCode
+        $process.Dispose()
+    } catch {
+        $stopwatch.Stop()
+        return [pscustomobject]@{
+            Available = $false; Encoder = $Encoder; Huffman = $Huffman
+            RealtimeFactor = 0.0; EstimatedMbps = 0.0; Error = $_.Exception.Message
+        }
+    }
+    if ($exitCode -ne 0 -or $stopwatch.Elapsed.TotalSeconds -le 0) {
+        $lastError = (($standardError -split "`r?`n") |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Select-Object -Last 1)
+        return [pscustomobject]@{
+            Available = $false; Encoder = $Encoder; Huffman = $Huffman
+            RealtimeFactor = 0.0; EstimatedMbps = 0.0; Error = [string]$lastError
+        }
+    }
+    $encodedFPS = $frameCount / $stopwatch.Elapsed.TotalSeconds
+    $sizeMatch = [regex]::Match($standardError, 'video:\s*(?<kib>[0-9]+)KiB')
+    $estimatedMbps = 0.0
+    if ($sizeMatch.Success) {
+        $encodedKiB = [double]$sizeMatch.Groups["kib"].Value
+        $mediaSeconds = $frameCount / $FPS
+        $estimatedMbps = ($encodedKiB * 1024.0 * 8.0) / ($mediaSeconds * 1000000.0)
+    }
+    return [pscustomobject]@{
+        Available = $true
+        Encoder = $Encoder
+        Huffman = $Huffman
+        RealtimeFactor = [double]($encodedFPS / $FPS)
+        EstimatedMbps = [double]$estimatedMbps
+        Error = ""
+    }
+}
+
+function Select-VcamMjpegEncoderProfile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Ffmpeg,
+        [Parameter(Mandatory = $true)][int]$Width,
+        [Parameter(Mandatory = $true)][int]$Height,
+        [Parameter(Mandatory = $true)][double]$FPS,
+        [Parameter(Mandatory = $true)][int]$Quality,
+        [Parameter(Mandatory = $true)][int]$Threads
+    )
+    $software = Measure-VcamMjpegEncoderCapacity -Ffmpeg $Ffmpeg -Encoder "mjpeg" `
+        -Width $Width -Height $Height -FPS $FPS -Quality $Quality -Threads $Threads `
+        -Huffman "optimal"
+    if (-not $software.Available) {
+        return [pscustomobject]@{
+            Encoder = "mjpeg"; Huffman = "optimal"; Capacity = $software
+            SoftwareCapacity = $software; HardwareCapacity = $null
+        }
+    }
+    if ($software.RealtimeFactor -lt 1.5) {
+        $defaultTables = Measure-VcamMjpegEncoderCapacity -Ffmpeg $Ffmpeg -Encoder "mjpeg" `
+            -Width $Width -Height $Height -FPS $FPS -Quality $Quality -Threads $Threads `
+            -Huffman "default"
+        if ($defaultTables.Available -and
+            $defaultTables.RealtimeFactor -ge $software.RealtimeFactor * 1.10) {
+            $software = $defaultTables
+        }
+    }
+
+    $hardware = $null
+    if (Test-VcamFfmpegEncoder -Ffmpeg $Ffmpeg -Encoder "mjpeg_qsv") {
+        $hardware = Measure-VcamMjpegEncoderCapacity -Ffmpeg $Ffmpeg -Encoder "mjpeg_qsv" `
+            -Width $Width -Height $Height -FPS $FPS -Quality $Quality -Threads $Threads
+    }
+    $useHardware = $hardware -and $hardware.Available -and
+        ($hardware.RealtimeFactor -ge 2.0 -or
+         ($software.RealtimeFactor -lt 1.5 -and $hardware.RealtimeFactor -gt $software.RealtimeFactor))
+    $selected = if ($useHardware) { $hardware } else { $software }
+    return [pscustomobject]@{
+        Encoder = $selected.Encoder
+        Huffman = $selected.Huffman
+        Capacity = $selected
+        SoftwareCapacity = $software
+        HardwareCapacity = $hardware
+    }
+}
+
 function Wait-VcamTcpListener {
     param(
         [Parameter(Mandatory = $true)][string]$Address,
@@ -884,12 +1012,14 @@ function New-VcamFfmpegArguments {
         [Parameter(Mandatory = $true)][string]$LogLevel,
         [string]$Transport = "mjpeg",
         [string]$OutputPath = "",
-        [double]$HlsSegmentDuration = 1.0,
-        [int]$HlsPlaylistSize = 4,
+        [double]$HlsSegmentDuration = 0.25,
+        [int]$HlsPlaylistSize = 6,
         [int]$HlsBitrateKbps = 12000,
         [int]$HlsPeakBitrateKbps = 16000,
-        [int]$HlsBufferKbps = 24000,
-        [string]$HlsEncoderPreset = "veryfast"
+        [int]$HlsBufferKbps = 12000,
+        [string]$HlsEncoderPreset = "ultrafast",
+        [ValidateSet("optimal", "default")][string]$MjpegHuffman = "optimal",
+        [ValidateSet("mjpeg", "mjpeg_qsv")][string]$MjpegEncoder = "mjpeg"
     )
     $normalizedTransport = $Transport.Trim().ToLowerInvariant()
     if ($normalizedTransport -notin @("mjpeg", "hls")) {
@@ -918,7 +1048,7 @@ function New-VcamFfmpegArguments {
         $captureFPS = if (Test-VcamFrameRateMatch -Actual $ObsMode.FPS `
                 -Requested $OutputFPS) { $OutputFPS } else { [double]$ObsMode.FPS }
         @(
-            "-fflags", "nobuffer",
+            "-fflags", "nobuffer+discardcorrupt",
             "-use_wallclock_as_timestamps", "1",
             "-f", "dshow",
             "-rtbufsize", ("{0}M" -f $RealtimeBuffer),
@@ -937,17 +1067,30 @@ function New-VcamFfmpegArguments {
         "-loglevel", $LogLevel,
         "-map", "0:v:0",
         "-an", "-sn", "-dn",
+        "-flags", "low_delay",
         "-vf", $filter
     )
 
     if ($normalizedTransport -eq "mjpeg") {
-        $outputArguments = @(
-            "-c:v", "mjpeg",
-            "-threads", [string]$MjpegEncoderThreads,
-            "-pix_fmt", "yuvj420p",
-            "-q:v", [string]$OutputQuality,
-            "-huffman", "optimal",
+        $encoderArguments = if ($MjpegEncoder -eq "mjpeg_qsv") {
+            @(
+                "-c:v", "mjpeg_qsv",
+                "-pix_fmt", "nv12",
+                "-global_quality", [string]$OutputQuality,
+                "-async_depth", "4"
+            )
+        } else {
+            @(
+                "-c:v", "mjpeg",
+                "-threads", [string]$MjpegEncoderThreads,
+                "-pix_fmt", "yuvj420p",
+                "-q:v", [string]$OutputQuality,
+                "-huffman", $MjpegHuffman
+            )
+        }
+        $outputArguments = @($encoderArguments + @(
             "-fps_mode", "passthrough",
+            "-flush_packets", "1",
             "-f", "fifo",
             "-fifo_format", "mpjpeg",
             "-queue_size", [string]$NetworkQueueSize,
@@ -956,7 +1099,7 @@ function New-VcamFfmpegArguments {
                 "tcp_nodelay=1:tcp_keepalive=1:" +
                 "content_type=multipart/x-mixed-replace;boundary=ffmpeg") -f ($NetworkSendBufferMB * 1MB)),
             $ListenerURL
-        )
+        ))
         return @($inputArguments + $commonPrefix + $outputArguments)
     }
 
@@ -974,6 +1117,8 @@ function New-VcamFfmpegArguments {
         "-c:v", "libx264",
         "-preset", $HlsEncoderPreset,
         "-tune", "zerolatency",
+        "-bf", "0",
+        "-refs", "1",
         "-pix_fmt", "yuv420p",
         "-b:v", ("{0}k" -f $HlsBitrateKbps),
         "-maxrate", ("{0}k" -f $HlsPeakBitrateKbps),
@@ -984,11 +1129,13 @@ function New-VcamFfmpegArguments {
         "-force_key_frames", ("expr:gte(t,n_forced*{0})" -f $segmentText),
         "-fps_mode", "cfr",
         "-r", (Format-VcamFrameRate -Value $OutputFPS),
+        "-muxdelay", "0",
+        "-muxpreload", "0",
         "-f", "hls",
         "-hls_time", $segmentText,
         "-hls_list_size", [string]$HlsPlaylistSize,
         "-hls_delete_threshold", "2",
-        "-hls_flags", "delete_segments+independent_segments+omit_endlist+temp_file",
+        "-hls_flags", "delete_segments+independent_segments+omit_endlist+temp_file+program_date_time",
         "-hls_segment_filename", $segmentPattern,
         $OutputPath
     )
@@ -1027,11 +1174,11 @@ function Invoke-VcamSelfTest {
         Stop-Vcam -ExitCode 70 -Message "Custom frame-rate parsing self-test failed."
     }
     $adaptiveQueues = Get-VcamAdaptiveQueueSettings -FPS $highFPS `
-        -Width 1920 -Height 1080 -RealtimeBufferMinimum 256 `
-        -PacketQueueMinimum 32 -NetworkQueueMinimum 64
-    if ($adaptiveQueues.RealtimeBuffer -ne 475 -or
-        $adaptiveQueues.PacketQueue -ne 120 -or
-        $adaptiveQueues.NetworkQueue -ne 240) {
+        -Width 1920 -Height 1080 -RealtimeBufferMinimum 64 `
+        -PacketQueueMinimum 4 -NetworkQueueMinimum 3
+    if ($adaptiveQueues.RealtimeBuffer -ne 238 -or
+        $adaptiveQueues.PacketQueue -ne 60 -or
+        $adaptiveQueues.NetworkQueue -ne 36) {
         Stop-Vcam -ExitCode 70 -Message "High frame-rate queue scaling self-test failed."
     }
     $sampleIni = ConvertFrom-VcamIniText -Text @"
@@ -1083,13 +1230,14 @@ FPSDen=1001
         -CaptureDevice "OBS Virtual Camera" -ObsMode $selectedMode `
         -RealtimeBuffer 256 -PacketQueueSize 32 `
         -MjpegEncoderThreads 4 -NetworkQueueSize 64 `
-        -NetworkSendBufferMB 4 -LogLevel "error")
+        -NetworkSendBufferMB 4 -LogLevel "error" -MjpegHuffman "default")
     $argumentText = $argumentTest -join "`n"
     if ($argumentText -like "*fps=*" -or
         $argumentText -notlike "*-vf`nsetsar=1*" -or
         $argumentText -like "*scale=1920:1080*" -or
         $argumentText -notlike "*-loglevel`nerror*" -or
         $argumentText -notlike "*-fps_mode`npassthrough*" -or
+        $argumentText -notlike "*-huffman`ndefault*" -or
         $argumentText -notlike "*-threads`n4*" -or
         $argumentText -notlike "*-fifo_format`nmpjpeg*" -or
         $argumentText -notlike "*-drop_pkts_on_overflow`n1*" -or
@@ -1109,6 +1257,20 @@ FPSDen=1001
     $frameRateIndex = [Array]::IndexOf($integerArgumentTest, "-framerate")
     if ($frameRateIndex -lt 0 -or $integerArgumentTest[$frameRateIndex + 1] -ne "30") {
         Stop-Vcam -ExitCode 70 -Message "OBS capture frame-rate normalization self-test failed."
+    }
+    $qsvArgumentTest = @(New-VcamFfmpegArguments -InputSource "obs" `
+        -CanvasWidth 1920 -CanvasHeight 1080 -OutputFPS 30 `
+        -OutputScaleMode "fill" -OutputQuality 5 `
+        -ListenerURL "http://127.0.0.1:18888/live.mjpg" `
+        -CaptureDevice "OBS Virtual Camera" -ObsMode $integerMode `
+        -RealtimeBuffer 256 -PacketQueueSize 32 `
+        -MjpegEncoderThreads 4 -NetworkQueueSize 64 `
+        -NetworkSendBufferMB 4 -LogLevel "error" -MjpegEncoder "mjpeg_qsv")
+    $qsvArgumentText = $qsvArgumentTest -join "`n"
+    if ($qsvArgumentText -notlike "*-c:v`nmjpeg_qsv*" -or
+        $qsvArgumentText -notlike "*-global_quality`n5*" -or
+        $qsvArgumentText -like "*-huffman*") {
+        Stop-Vcam -ExitCode 70 -Message "QSV MJPEG argument self-test failed."
     }
     $fallbackMode = [pscustomobject]@{
         PixelFormat = "nv12"; Width = 1920; Height = 1080; FPS = [double]60
@@ -1135,14 +1297,14 @@ FPSDen=1001
         -MjpegEncoderThreads 4 -NetworkQueueSize 64 `
         -NetworkSendBufferMB 4 -LogLevel "error" `
         -Transport "hls" -OutputPath "C:\Temp\VirtualCamPro\live.m3u8" `
-        -HlsSegmentDuration 1 -HlsPlaylistSize 4 `
+        -HlsSegmentDuration 0.25 -HlsPlaylistSize 6 `
         -HlsBitrateKbps 12000 -HlsPeakBitrateKbps 16000 `
-        -HlsBufferKbps 24000 -HlsEncoderPreset "veryfast")
+        -HlsBufferKbps 24000 -HlsEncoderPreset "ultrafast")
     $hlsArgumentText = $hlsArgumentTest -join "`n"
     if ($hlsArgumentText -notlike "*-c:v`nlibx264*" -or
         $hlsArgumentText -notlike "*-f`nhls*" -or
-        $hlsArgumentText -notlike "*-hls_time`n1*" -or
-        $hlsArgumentText -notlike "*-hls_list_size`n4*" -or
+        $hlsArgumentText -notlike "*-hls_time`n0.25*" -or
+        $hlsArgumentText -notlike "*-hls_list_size`n6*" -or
         $hlsArgumentText -notlike "*-hls_segment_filename`nC:\Temp\VirtualCamPro\segment_%06d.ts*" -or
         $hlsArgumentTest[-1] -ne "C:\Temp\VirtualCamPro\live.m3u8") {
         Stop-Vcam -ExitCode 70 -Message "HLS FFmpeg argument self-test failed."
@@ -1155,6 +1317,20 @@ FPSDen=1001
     if (-not (Get-Command Test-VcamObsWebSocketAuthentication -ErrorAction SilentlyContinue) -or
         -not (Test-VcamObsWebSocketAuthentication)) {
         Stop-Vcam -ExitCode 70 -Message "OBS WebSocket authentication self-test failed."
+    }
+    $selfTestFfmpeg = Get-Command ffmpeg.exe -ErrorAction SilentlyContinue
+    if ($selfTestFfmpeg) {
+        $capacityTest = Measure-VcamMjpegEncoderCapacity -Ffmpeg $selfTestFfmpeg.Source `
+            -Encoder "mjpeg" -Width 640 -Height 360 -FPS 30 -Quality 5 -Threads 2
+        if (-not $capacityTest.Available -or $capacityTest.RealtimeFactor -le 0) {
+            Stop-Vcam -ExitCode 70 -Message "MJPEG encoder-capacity self-test failed."
+        }
+        $profileTest = Select-VcamMjpegEncoderProfile -Ffmpeg $selfTestFfmpeg.Source `
+            -Width 640 -Height 360 -FPS 30 -Quality 5 -Threads 2
+        if ($profileTest.Encoder -notin @("mjpeg", "mjpeg_qsv") -or
+            $profileTest.Huffman -notin @("optimal", "default")) {
+            Stop-Vcam -ExitCode 70 -Message "MJPEG adaptive encoder selection self-test failed."
+        }
     }
     Write-VcamStatus -Level "OK" -Message "Windows tooling self-test passed."
     exit 0
@@ -1213,12 +1389,12 @@ if ($effectiveTransport -notin @("mjpeg", "hls")) {
 }
 $effectiveHlsSegmentSeconds = ConvertTo-VcamFrameRate `
     -Value (Get-VcamSetting -ExplicitValue $HlsSegmentSeconds `
-        -EnvironmentName "VCAM_HLS_SEGMENT_SECONDS" -DefaultValue "1") `
-    -Name "HLS segment duration" -Minimum 0.5 -Maximum 10
+        -EnvironmentName "VCAM_HLS_SEGMENT_SECONDS" -DefaultValue "0.25") `
+    -Name "HLS segment duration" -Minimum 0.2 -Maximum 10
 $effectiveHlsListSize = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $HlsListSize `
-        -EnvironmentName "VCAM_HLS_LIST_SIZE" -DefaultValue "4") `
-    -Name "HLS playlist size" -Minimum 2 -Maximum 30
+        -EnvironmentName "VCAM_HLS_LIST_SIZE" -DefaultValue "6") `
+    -Name "HLS playlist size" -Minimum 6 -Maximum 30
 $effectiveHlsVideoBitrateKbps = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $HlsVideoBitrateKbps `
         -EnvironmentName "VCAM_HLS_VIDEO_BITRATE_KBPS" -DefaultValue "12000") `
@@ -1229,13 +1405,13 @@ $effectiveHlsMaxrateKbps = ConvertTo-VcamInteger `
     -Name "HLS maximum bitrate" -Minimum 500 -Maximum 120000
 $effectiveHlsBufsizeKbps = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $HlsBufsizeKbps `
-        -EnvironmentName "VCAM_HLS_BUFSIZE_KBPS" -DefaultValue "24000") `
+        -EnvironmentName "VCAM_HLS_BUFSIZE_KBPS" -DefaultValue "12000") `
     -Name "HLS VBV buffer" -Minimum 500 -Maximum 200000
 if ($effectiveHlsMaxrateKbps -lt $effectiveHlsVideoBitrateKbps) {
     Stop-Vcam -ExitCode 64 -Message "HLS maximum bitrate must be greater than or equal to the target bitrate."
 }
 $effectiveHlsPreset = (Get-VcamSetting -ExplicitValue $HlsPreset `
-    -EnvironmentName "VCAM_HLS_PRESET" -DefaultValue "veryfast").ToLowerInvariant()
+    -EnvironmentName "VCAM_HLS_PRESET" -DefaultValue "ultrafast").ToLowerInvariant()
 if ($effectiveHlsPreset -notin @("ultrafast", "superfast", "veryfast", "faster", "fast", "medium")) {
     Stop-Vcam -ExitCode 64 -Message (
         "HLS preset must be ultrafast, superfast, veryfast, faster, fast, or medium."
@@ -1263,11 +1439,11 @@ $effectiveRestart = ConvertTo-VcamBoolean `
     -Name "restart-on-disconnect"
 $effectiveRealtimeBufferMB = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $RealtimeBufferMB `
-        -EnvironmentName "VCAM_RT_BUFFER_MB" -DefaultValue "256") `
+        -EnvironmentName "VCAM_RT_BUFFER_MB" -DefaultValue "64") `
     -Name "DirectShow real-time buffer" -Minimum 16 -Maximum 1024
 $effectiveThreadQueueSize = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $ThreadQueueSize `
-        -EnvironmentName "VCAM_THREAD_QUEUE_SIZE" -DefaultValue "32") `
+        -EnvironmentName "VCAM_THREAD_QUEUE_SIZE" -DefaultValue "4") `
     -Name "DirectShow packet queue" -Minimum 1 -Maximum 256
 $effectiveEncoderThreads = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $EncoderThreads `
@@ -1275,7 +1451,7 @@ $effectiveEncoderThreads = ConvertTo-VcamInteger `
     -Name "MJPEG encoder threads" -Minimum 1 -Maximum 16
 $effectiveOutputQueueSize = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $OutputQueueSize `
-        -EnvironmentName "VCAM_OUTPUT_QUEUE_SIZE" -DefaultValue "64") `
+        -EnvironmentName "VCAM_OUTPUT_QUEUE_SIZE" -DefaultValue "3") `
     -Name "MJPEG network queue" -Minimum 1 -Maximum 600
 $adaptiveQueues = Get-VcamAdaptiveQueueSettings -FPS $effectiveFPS `
     -Width $canvas.Width -Height $canvas.Height `
@@ -1284,7 +1460,7 @@ $adaptiveQueues = Get-VcamAdaptiveQueueSettings -FPS $effectiveFPS `
     -NetworkQueueMinimum $effectiveOutputQueueSize
 $effectiveTcpSendBufferMB = ConvertTo-VcamInteger `
     -Value (Get-VcamSetting -ExplicitValue $TcpSendBufferMB `
-        -EnvironmentName "VCAM_TCP_SEND_BUFFER_MB" -DefaultValue "4") `
+        -EnvironmentName "VCAM_TCP_SEND_BUFFER_MB" -DefaultValue "1") `
     -Name "TCP send buffer" -Minimum 1 -Maximum 16
 $effectiveRequireObsModeMatch = ConvertTo-VcamBoolean `
     -Value (Get-VcamSetting -ExplicitValue $RequireObsModeMatch `
@@ -1330,12 +1506,43 @@ if ($effectiveTransport -eq "hls" -and
         "Install a standard Gyan FFmpeg build or switch VCAM_TRANSPORT to mjpeg."
     )
 }
+$mjpegEncoderProfile = $null
+if ($effectiveTransport -eq "mjpeg") {
+    $mjpegEncoderProfile = Select-VcamMjpegEncoderProfile -Ffmpeg $ffmpeg `
+        -Width $canvas.Width -Height $canvas.Height -FPS $effectiveFPS `
+        -Quality $effectiveQuality -Threads $effectiveEncoderThreads
+}
 
 Write-Host ""
 Write-Host "============================================================"
 Write-Host " VirtualCamPro Windows streaming tool"
 Write-Host "============================================================"
 Write-VcamStatus -Level "OK" -Message "FFmpeg: $ffmpeg"
+if ($mjpegEncoderProfile) {
+    $capacity = $mjpegEncoderProfile.Capacity
+    if ($capacity.Available) {
+        $encoderDisplay = if ($mjpegEncoderProfile.Encoder -eq "mjpeg_qsv") {
+            "Intel Quick Sync MJPEG"
+        } else {
+            "software MJPEG / Huffman $($mjpegEncoderProfile.Huffman)"
+        }
+        Write-VcamStatus -Level "OK" -Message ((
+            "Encoder preflight selected {0}; measured reserve {1:0.00}x real-time; " +
+            "synthetic stream estimate {2:0.0} Mbit/s."
+        ) -f $encoderDisplay, $capacity.RealtimeFactor, $capacity.EstimatedMbps)
+        if ($capacity.RealtimeFactor -lt 1.25) {
+            Write-VcamStatus -Level "WARN" -Message (
+                "Encoder reserve is below 1.25x at the current OBS resolution/FPS/quality. " +
+                "The bridge will preserve those OBS settings, but sustained CPU/GPU load can still drop frames."
+            )
+        }
+    } else {
+        Write-VcamStatus -Level "WARN" -Message (
+            "Encoder preflight could not run; using the compatible software MJPEG path. " +
+            $capacity.Error
+        )
+    }
+}
 if ($obsSavedSettings) {
     Write-VcamStatus -Level "OK" -Message ((
         "Saved OBS profile '{0}': base {1}x{2}, output {3}x{4}, {5} FPS"
@@ -1688,7 +1895,9 @@ try {
             -HlsBitrateKbps $effectiveHlsVideoBitrateKbps `
             -HlsPeakBitrateKbps $effectiveHlsMaxrateKbps `
             -HlsBufferKbps $effectiveHlsBufsizeKbps `
-            -HlsEncoderPreset $effectiveHlsPreset)
+            -HlsEncoderPreset $effectiveHlsPreset `
+            -MjpegEncoder $(if ($mjpegEncoderProfile) { $mjpegEncoderProfile.Encoder } else { "mjpeg" }) `
+            -MjpegHuffman $(if ($mjpegEncoderProfile) { $mjpegEncoderProfile.Huffman } else { "optimal" }))
 
         $startedAt = [DateTime]::UtcNow
         & $ffmpeg @ffmpegArguments

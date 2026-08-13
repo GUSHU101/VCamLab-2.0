@@ -41,9 +41,9 @@ standalone-manifest.json 记录独立工具内每个交付文件的大小和 SHA
 自定义流 URL 的查询参数可能包含访问令牌，控制中心不会把查询参数写入运行日志。
 
 六、传输模式说明
-MJPEG 默认使用 4 个编码线程；256 MiB DirectShow、32 帧输入队列和 64 帧网络 FIFO 都是下限，高分辨率/FPS 会自动扩展，同时保留 OBS 原始 FPS并使用 MJPEG 最高质量 1。2.10.0 还显式发送标准 multipart/x-mixed-replace HTTP Content-Type，提升播放器/客户端协议识别的一致性。
-HLS 默认使用 H.264/libx264、1 秒分片、4 段实时播放列表、12 Mbps 目标码率，并由工具自带 PowerShell HTTP 服务提供 .m3u8 和 .ts 文件，不依赖 Python 或 Nginx。
-当前随包提供的 iOS 2.8.0 插件二进制中同时存在 MJPEG 与 HLS/.m3u8 接收逻辑。
+MJPEG 默认使用 4 个编码线程、64 MiB DirectShow 短缓冲、4 帧输入队列、3 帧网络 FIFO 和 1 MiB TCP 发送缓冲；拥塞时淘汰旧包而不是积累秒级延迟，同时保留 OBS 原始 FPS和最高质量 1。
+HLS 默认使用 H.264/libx264 ultrafast、0.25 秒分片、6 段实时播放列表和 12 Mbps 目标码率，并写入独立分片标记与节目时间戳，由工具自带 PowerShell HTTP 服务提供 .m3u8 和 .ts 文件。
+正式 iOS 2.10.0 插件由 GitHub Actions 从同一提交构建，同时包含 MJPEG 与 HLS/.m3u8 接收逻辑。
 
 
 【控制中心打不开 / 闪退】

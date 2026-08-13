@@ -15,12 +15,30 @@ typedef enum {
 typedef struct {
     size_t offset;
     bool insideScan;
+    uint16_t width;
+    uint16_t height;
+    bool sawFrameDimensions;
 } VCJPEGParserState;
 
 static inline void VCJPEGParserReset(VCJPEGParserState *state) {
     if (!state) return;
     state->offset = 0;
     state->insideScan = false;
+    state->width = 0;
+    state->height = 0;
+    state->sawFrameDimensions = false;
+}
+
+static inline bool VCJPEGParserMarkerContainsDimensions(uint8_t marker) {
+    switch (marker) {
+        case 0xC0: case 0xC1: case 0xC2: case 0xC3:
+        case 0xC5: case 0xC6: case 0xC7:
+        case 0xC9: case 0xCA: case 0xCB:
+        case 0xCD: case 0xCE: case 0xCF:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static inline VCJPEGParserResult VCJPEGParserSaveState(VCJPEGParserState *state,
@@ -106,6 +124,22 @@ static inline VCJPEGParserResult VCJPEGParserConsume(const uint8_t *bytes,
         if (segmentLength < 2) return VCJPEGParserResultInvalid;
         if (segmentLength > length - offset) {
             return VCJPEGParserSaveState(state, markerStart, markerFromScan);
+        }
+        if (VCJPEGParserMarkerContainsDimensions(marker)) {
+            // SOF payload: precision (1), height (2), width (2), components...
+            // Reading it while parsing avoids an ImageIO properties pass for
+            // every live frame on the decoder hot path.
+            if (segmentLength < 8) return VCJPEGParserResultInvalid;
+            uint16_t height = (uint16_t)(((uint16_t)bytes[offset + 3] << 8) |
+                                         bytes[offset + 4]);
+            uint16_t width = (uint16_t)(((uint16_t)bytes[offset + 5] << 8) |
+                                        bytes[offset + 6]);
+            if (width == 0 || height == 0) return VCJPEGParserResultInvalid;
+            if (state) {
+                state->width = width;
+                state->height = height;
+                state->sawFrameDimensions = true;
+            }
         }
         offset += segmentLength;
         insideScan = marker == 0xDA || (markerFromScan && marker == 0xDC);

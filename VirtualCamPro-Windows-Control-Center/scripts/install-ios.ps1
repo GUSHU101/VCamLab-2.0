@@ -435,7 +435,7 @@ function Invoke-PhoneSelfTest {
         (Test-PhoneUserValue -Value "mobile@bad")) {
         Stop-PhoneTool -ExitCode 70 -Message "Phone user validation self-test failed."
     }
-    $packageName = "com.murkaska.virtualcampro_2.8.0_iphoneos-arm64.deb"
+    $packageName = "com.murkaska.virtualcampro_2.10.0_iphoneos-arm64.deb"
     if (-not (Test-PhonePackageName -Value $packageName) -or
         (Test-PhonePackageName -Value "bad;touch_iphoneos-arm64.deb")) {
         Stop-PhoneTool -ExitCode 70 -Message "Package name validation self-test failed."
@@ -616,7 +616,7 @@ if ($normalizedMode -eq "setup") {
     }
     $displayStreamURL = Format-PhoneStreamURLForDisplay -Value $effectiveStreamURL
     Write-PhoneStatus -Level "INFO" -Message (
-        "Configuring the phone with $displayStreamURL and a $effectivePreferredFPS FPS decode cap..."
+        "Configuring $displayStreamURL; local-file FPS limit is $effectivePreferredFPS (network FPS remains sender-controlled)..."
     )
     $setupExitCode = Invoke-PhoneSSH -Executable $ssh -Address $effectiveHost `
         -Port $effectivePort -User $effectiveUser `

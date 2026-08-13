@@ -1,0 +1,83 @@
+name: Source validation
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+concurrency:
+  group: source-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  portable-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate repository invariants
+        run: python3 scripts/validate_project.py
+
+      - name: Validate shell entry points
+        run: |
+          bash -n setup-config.sh scripts/verify_deb.sh \
+            layout/DEBIAN/postinst layout/DEBIAN/postrm
+          bash setup-config.sh --self-test
+
+      - name: Test incremental JPEG parser with sanitizers
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -pedantic \
+            -fno-omit-frame-pointer -fsanitize=address,undefined \
+            tests/test_jpeg_parser.c -o /tmp/test_jpeg_parser
+          ASAN_OPTIONS=detect_leaks=1 /tmp/test_jpeg_parser
+
+      - name: Test shared media protocol with sanitizers
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -pedantic \
+            -fno-omit-frame-pointer -fsanitize=address,undefined \
+            tests/test_shared_media_protocol.c -lm -o /tmp/test_shared_media_protocol
+          ASAN_OPTIONS=detect_leaks=1 /tmp/test_shared_media_protocol
+
+  windows-control-center:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Validate Windows source scripts
+        shell: powershell
+        run: |
+          python scripts/validate_project.py
+          powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/verify-standalone.ps1
+          powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/windows-vcam.ps1 -Mode SelfTest
+          powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/install-ios.ps1 -Mode SelfTest
+          powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/deep-self-test.ps1 -RootPath VirtualCamPro-Windows-Control-Center
+
+      - name: Rebuild and verify package-free Windows companion
+        shell: powershell
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'VirtualCamPro-Windows-standalone'
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-windows-standalone.ps1 -OutputDirectory $output -AllowMissingPackage -CreateZip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $output 'scripts/verify-standalone.ps1') -RootPath $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $output 'scripts/deep-self-test.ps1') -RootPath $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload verified Windows companion
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: VirtualCamPro-Windows-control-center
+          path: ${{ runner.temp }}\VirtualCamPro-Windows-standalone.zip
+          if-no-files-found: error
+          retention-days: 14

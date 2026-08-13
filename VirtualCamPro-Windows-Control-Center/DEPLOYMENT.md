@@ -1,6 +1,6 @@
 ﻿# VirtualCamPro Windows 控制中心 2.10.0 部署教程
 
-本目录是可直接使用的 Windows 独立控制中心，已经包含最新版 Rootless 安装包、图形控制中心、OBS/FFmpeg 桥接工具、命令行工具和完整性清单。普通用户不需要复制仓库根目录中的 iOS 源码。
+本目录是可直接使用的 Windows 独立控制中心，包含图形控制中心、OBS/FFmpeg 桥接工具、命令行工具和完整性清单。为避免混用历史二进制，源码仓库不附带 `.deb`；请从同一提交的 GitHub Actions `VirtualCamPro-rootless` artifact 下载正式 Rootless 安装包并放入本目录的 `packages/`。普通用户不需要复制仓库根目录中的 iOS 源码。
 
 ## 1. 使用条件
 
@@ -29,7 +29,7 @@ standalone-self-test.bat
 3. 图片需要无变形铺满时，在“变换 → 编辑变换”中使用“缩放到外部边界”，边界尺寸设为 OBS 画布尺寸。
 4. 建议在“工具 → WebSocket 服务器设置”中启用带身份验证的服务器。控制中心可以在不关闭 OBS 的情况下启动或刷新 Virtual Camera。
 
-默认 `obs-vcam-config.cmd` 使用 `VCAM_TRANSPORT=mjpeg` 和 MJPEG 最高质量 `VCAM_QUALITY=1`，并自动读取 OBS 保存的分辨率和 FPS。需要 HLS 时可在控制中心选择“HLS / H.264”，或设置 `VCAM_TRANSPORT=hls`。HLS 默认使用 1 秒分片、4 段播放列表和 `libx264`。工具不会暗中修改用户指定的 OBS FPS/分辨率。
+默认 `obs-vcam-config.cmd` 使用 `VCAM_TRANSPORT=mjpeg` 和 MJPEG 最高质量 `VCAM_QUALITY=1`，并自动读取 OBS 保存的分辨率和 FPS。需要 HLS 时可选择“HLS / H.264”；低延迟默认使用 0.25 秒分片、6 段播放列表、`libx264 ultrafast`，并写入独立分片和节目时间戳。工具不会暗中修改用户指定的 OBS FPS/分辨率。
 
 ## 4. 检查手机环境
 
@@ -47,8 +47,8 @@ install-phone.bat --check 192.168.1.103
 
 图形界面推荐流程：
 
-1. 安装包保持为本目录 `packages/` 中自动识别的 `.deb`。
-2. 手机 FPS 默认 `60`；只有完整链路确实支持时才填写更高值。
+1. 从同一提交的 GitHub Actions `VirtualCamPro-rootless` artifact 取得 `.deb`，放入本目录 `packages/`；工具会自动识别，也可在界面中手动选择。
+2. “手机本地视频最高 FPS”默认 `60`，它不限制网络流；网络参数跟随 OBS/Windows 发送端。
 3. 点击“一键部署到手机”。
 4. 工具会核对本地 SHA-256、上传字节数、手机端包 ID/版本/架构和安装后的精确版本，然后删除手机中的临时上传文件。
 5. 部署完成后点击“验证安装”。
@@ -84,13 +84,13 @@ start-obs-vcam.bat
 
 保持桥接窗口打开。默认 MJPEG 服务地址为 `http://电脑局域网IP:8888/live.mjpg`。HLS 模式使用 `http://电脑局域网IP:8888/live.m3u8`。命令行可直接运行 `start-obs-vcam.bat --transport hls` 或 `start-obs-vcam.bat --transport mjpeg`。
 
-MJPEG 模式会按分辨率和 FPS 自动扩展 DirectShow 实时缓冲，并使用多线程 JPEG、输入队列、编码 FIFO 和 TCP 发送缓冲吸收短时网络抖动。HLS 模式改用 H.264/x264、关键帧对齐分片和内置 HTTP 文件服务，显著降低带宽，但普通 HLS 会增加几秒级缓冲延迟。
+MJPEG 模式使用多线程 JPEG、约 100–150 ms 的短输入缓冲、3–12 帧编码 FIFO 和 TCP_NODELAY。持续拥塞时优先丢弃旧包而不是积累秒级延迟。HLS 模式使用 H.264/x264、250 ms 关键帧对齐分片和内置 HTTP 文件服务；它仍比 MJPEG 延迟高，实时使用优先选择 MJPEG。
 
 ## 7. 手机端启用与验收
 
 1. 打开“设置 → VirtualCamPro”。
 2. 确认“启用画面替换”开启，“应用层兼容模式”默认关闭。
-3. 确认流 URL 正确，点击“检测当前网络流”。当前 2.8.0 iOS 包同时包含 MJPEG 接收器和基于 AVPlayer 的 HLS `.m3u8` 接收路径。
+3. 确认流 URL 正确，点击“检测当前网络流”。2.10.0 iOS 包同时包含 MJPEG 接收器、VideoToolbox/ImageIO 自动解码路径和基于 AVPlayer 的 HLS `.m3u8` 接收路径。
 4. 彻底退出并重新打开相机或目标应用。
 5. 验证预览、录像、照片和目标应用输入来自同一 OBS 构图。
 6. 验证横竖屏、前后摄、Live Photo、连拍及常用第三方相机客户端。

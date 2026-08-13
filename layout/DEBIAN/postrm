@@ -6,6 +6,7 @@ case "${1:-}" in
             killall mediaserverd 2>/dev/null || true
             killall Camera 2>/dev/null || true
             killall Preferences 2>/dev/null || true
+            killall SpringBoard 2>/dev/null || true
         fi
         ;;
 esac

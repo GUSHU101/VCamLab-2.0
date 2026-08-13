@@ -2,7 +2,11 @@
 
 #import "AVAssetStreamAdapter.h"
 #import "VCFrameConverter.h"
+#import "VCLocalMediaSource.h"
 #import "VCPreferences.h"
+#import "VCScreenCaptureSource.h"
+#import "VCSharedMediaBus.h"
+#import <float.h>
 #import <notify.h>
 #import <os/lock.h>
 
@@ -20,52 +24,106 @@ typedef NS_ENUM(uint64_t, VCStreamStatus) {
 
 @interface VCStreamCoordinator () {
     os_unfair_lock _stateLock;
-    CVPixelBufferRef _latestPixelBuffer;
-    CFAbsoluteTime _latestFrameTime;
-    CVPixelBufferRef _latestCompatibilityOutputPixelBuffer;
-    CFAbsoluteTime _latestCompatibilityOutputTime;
-    BOOL _compatibilityOutputPathActive;
     BOOL _replacementEnabled;
-    BOOL _systemPipelineReplacementConfigured;
+    BOOL _producerProcess;
+    VCSourceType _configuredSourceType;
     NSInteger _configuredFPS;
     CGFloat _configuredJPEGQuality;
     BOOL _configuredAspectFill;
+    NSInteger _configuredMaximumPixelDimension;
     NSInteger _configuredSourceRotation;
     BOOL _configuredMirrorSource;
     BOOL _configuredHoldLastFrame;
     NSTimeInterval _configuredStaleFrameTimeout;
-    NSUInteger _preferencesRefreshGeneration;
-    NSUInteger _streamGeneration;
+    NSUInteger _preferencesGeneration;
+    NSUInteger _sourceGeneration;
     NSUInteger _transformGeneration;
-    NSUInteger _frameProcessingGeneration;
     CVPixelBufferRef _pendingPixelBuffer;
-    NSUInteger _pendingStreamGeneration;
+    NSUInteger _pendingSourceGeneration;
     BOOL _frameProcessingScheduled;
-    NSUInteger _coalescedFrameCount;
-    CFAbsoluteTime _lastCoalescingLogTime;
+    CVPixelBufferRef _latestCompatibilityOutputPixelBuffer;
+    CFAbsoluteTime _latestCompatibilityOutputTime;
+    BOOL _compatibilityOutputPathActive;
     int _streamStatusToken;
     uint64_t _publishedStreamStatus;
     BOOL _loggedFirstFrame;
     BOOL _loggedStaleFrame;
+    CFAbsoluteTime _lastVolumeButtonActionTime;
 }
-@property (atomic, strong) AVAssetStreamAdapter *adapter;
-@property (nonatomic, copy) NSURL *activeURL;
-@property (nonatomic, assign) BOOL mediaServerProcess;
-@property (nonatomic, strong) dispatch_source_t memoryPressureSource;
+@property (nonatomic, strong) AVAssetStreamAdapter *networkSource;
+@property (nonatomic, strong) VCScreenCaptureSource *screenSource;
+@property (nonatomic, strong) VCLocalMediaSource *localSource;
+@property (nonatomic, copy) NSArray<NSURL *> *localMediaPlaylist;
+@property (nonatomic, assign) NSInteger localMediaPlaylistIndex;
+@property (nonatomic, copy) NSString *activeSourceIdentity;
 @property (nonatomic, strong) dispatch_queue_t frameProcessingQueue;
-- (BOOL)hasUsableReplacementFrame;
+@property (nonatomic, strong) dispatch_source_t memoryPressureSource;
 @end
+
+static BOOL VCURLHasSupportedLocalVideoExtension(NSURL *url) {
+    static NSSet<NSString *> *extensions;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        extensions = [NSSet setWithArray:@[
+            @"mp4", @"mov", @"m4v", @"3gp", @"3g2",
+            @"avi", @"mpg", @"mpeg", @"ts", @"mts", @"m2ts",
+        ]];
+    });
+    return [extensions containsObject:url.pathExtension.lowercaseString];
+}
+
+static NSArray<NSURL *> *VCLocalVideoPlaylistForURL(NSURL *selectedURL,
+                                                     NSInteger *selectedIndex) {
+    if (selectedIndex) *selectedIndex = NSNotFound;
+    if (!selectedURL.isFileURL) return @[];
+    NSURL *directory = selectedURL.URLByDeletingLastPathComponent;
+    NSArray<NSURLResourceKey> *keys = @[NSURLIsRegularFileKey];
+    NSMutableArray<NSURL *> *videos = [NSMutableArray array];
+    NSDirectoryEnumerator<NSURL *> *entries = [[NSFileManager defaultManager]
+        enumeratorAtURL:directory
+includingPropertiesForKeys:keys
+             options:NSDirectoryEnumerationSkipsHiddenFiles |
+                     NSDirectoryEnumerationSkipsSubdirectoryDescendants
+        errorHandler:^BOOL(__unused NSURL *url, __unused NSError *error) {
+            return YES;
+        }];
+    NSUInteger inspectedCount = 0;
+    for (NSURL *entry in entries) {
+        if (++inspectedCount > 4096 || videos.count >= 512) break;
+        NSNumber *regular = nil;
+        [entry getResourceValue:&regular forKey:NSURLIsRegularFileKey error:NULL];
+        if (regular.boolValue && VCURLHasSupportedLocalVideoExtension(entry)) {
+            [videos addObject:entry];
+        }
+    }
+    [videos sortUsingComparator:^NSComparisonResult(NSURL *left, NSURL *right) {
+        return [left.lastPathComponent localizedStandardCompare:right.lastPathComponent];
+    }];
+    NSUInteger index = [videos indexOfObjectPassingTest:^BOOL(NSURL *candidate,
+                                                               NSUInteger idx,
+                                                               BOOL *stop) {
+        return [candidate.path isEqualToString:selectedURL.path];
+    }];
+    if (selectedIndex && index != NSNotFound) *selectedIndex = (NSInteger)index;
+    return videos;
+}
 
 static void VCPreferencesDidChange(CFNotificationCenterRef center,
                                    void *observer,
                                    CFStringRef name,
                                    const void *object,
                                    CFDictionaryRef userInfo) {
-    VCStreamCoordinator *coordinator = (__bridge VCStreamCoordinator *)observer;
-    [coordinator refreshPreferencesAndStream];
+    [(__bridge VCStreamCoordinator *)observer refreshPreferencesAndStream];
 }
 
 @implementation VCStreamCoordinator
+
++ (instancetype)sharedCoordinator {
+    static VCStreamCoordinator *coordinator;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ coordinator = [[self alloc] init]; });
+    return coordinator;
+}
 
 - (instancetype)init {
     self = [super init];
@@ -74,36 +132,32 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         _configuredFPS = 60;
         _configuredJPEGQuality = 1.0;
         _configuredAspectFill = YES;
-        _configuredSourceRotation = 0;
-        _configuredMirrorSource = NO;
+        _configuredMaximumPixelDimension = 1920;
         _configuredHoldLastFrame = YES;
         _configuredStaleFrameTimeout = 8.0;
-        _streamGeneration = 1;
+        _preferencesGeneration = 1;
+        _sourceGeneration = 1;
         _transformGeneration = 1;
-        _frameProcessingGeneration = 1;
         _streamStatusToken = VCInvalidNotifyToken;
-        _publishedStreamStatus = ~(uint64_t)0;
+        _publishedStreamStatus = UINT64_MAX;
+        NSString *process = NSProcessInfo.processInfo.processName;
+        NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+        _producerProcess = [process isEqualToString:@"SpringBoard"] ||
+                           [bundle isEqualToString:@"com.apple.springboard"];
+        dispatch_queue_attr_t attributes =
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,
+                                                     QOS_CLASS_USER_INTERACTIVE,
+                                                     0);
         _frameProcessingQueue = dispatch_queue_create(
-            "com.murkaska.virtualcampro.frame-processing",
-            DISPATCH_QUEUE_SERIAL);
+            "com.murkaska.virtualcampro.frame-processing", attributes);
     }
     return self;
-}
-
-+ (instancetype)sharedCoordinator {
-    static VCStreamCoordinator *coordinator;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        coordinator = [[self alloc] init];
-        coordinator.mediaServerProcess = [NSProcessInfo.processInfo.processName isEqualToString:@"mediaserverd"];
-    });
-    return coordinator;
 }
 
 - (void)startMonitoring {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        if (self.mediaServerProcess &&
+        if (self->_producerProcess &&
             notify_register_check(VCStreamStatusNotificationName,
                                   &self->_streamStatusToken) == NOTIFY_STATUS_OK) {
             [self publishStreamStatus:VCStreamStatusDisabled];
@@ -120,414 +174,485 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
 }
 
 - (void)publishStreamStatus:(VCStreamStatus)status {
-    int statusToken = VCInvalidNotifyToken;
+    int token = VCInvalidNotifyToken;
     os_unfair_lock_lock(&_stateLock);
     if (_publishedStreamStatus != status) {
         _publishedStreamStatus = status;
-        statusToken = _streamStatusToken;
+        token = _streamStatusToken;
     }
     os_unfair_lock_unlock(&_stateLock);
-    if (statusToken == VCInvalidNotifyToken) return;
-    notify_set_state(statusToken, status);
+    if (token < 0) return;
+    notify_set_state(token, status);
     notify_post(VCStreamStatusNotificationName);
 }
 
 - (void)startMemoryPressureMonitoring {
     if (self.memoryPressureSource) return;
-    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_UTILITY, 0);
-    dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE,
-                                                       0,
-                                                       DISPATCH_MEMORYPRESSURE_WARN |
-                                                           DISPATCH_MEMORYPRESSURE_CRITICAL,
-                                                       queue);
+    dispatch_source_t source = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_MEMORYPRESSURE,
+        0,
+        DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     if (!source) return;
-
     __weak VCStreamCoordinator *weakSelf = self;
     dispatch_source_set_event_handler(source, ^{
         VCStreamCoordinator *strongSelf = weakSelf;
         if (!strongSelf) return;
         unsigned long pressure = dispatch_source_get_data(strongSelf.memoryPressureSource);
         VCFlushFrameConverterCaches(YES);
-        [strongSelf.adapter handleMemoryPressure];
-        if (pressure & DISPATCH_MEMORYPRESSURE_CRITICAL) {
-            [strongSelf clearLatestPixelBuffer];
-            [strongSelf publishStreamStatus:VCStreamStatusConnecting];
+        [strongSelf.networkSource handleMemoryPressure];
+        [strongSelf.screenSource handleMemoryPressure];
+        if (strongSelf->_producerProcess) {
+            [[VCSharedVideoServer sharedServer] handleMemoryPressure];
+            if (pressure & DISPATCH_MEMORYPRESSURE_CRITICAL) {
+                [[VCSharedAudioServer sharedServer] handleMemoryPressure];
+            }
         }
-        NSLog(@"[VirtualCamPro] Released conversion caches after %@ memory pressure",
-              (pressure & DISPATCH_MEMORYPRESSURE_CRITICAL) ? @"critical" : @"warning");
+        if (pressure & DISPATCH_MEMORYPRESSURE_CRITICAL) {
+            [strongSelf clearPendingAndCompatibilityFrames];
+        }
     });
     self.memoryPressureSource = source;
     dispatch_resume(source);
 }
 
-- (BOOL)processMatchesPreferences:(VCPreferences *)preferences {
-    return self.mediaServerProcess ? !preferences.compatibilityMode : preferences.compatibilityMode;
+- (NSString *)sourceIdentityForPreferences:(VCPreferences *)preferences {
+    switch (preferences.sourceType) {
+        case VCSourceTypeScreen:
+            return @"screen";
+        case VCSourceTypeLocalMedia:
+            return preferences.localMediaURL
+                ? [@"file:" stringByAppendingString:preferences.localMediaURL.path] : nil;
+        case VCSourceTypeNetwork:
+        default:
+            return preferences.streamURL
+                ? [@"network:" stringByAppendingString:preferences.streamURL.absoluteString] : nil;
+    }
 }
 
 - (void)refreshPreferencesAndStream {
     os_unfair_lock_lock(&_stateLock);
-    NSUInteger refreshGeneration = ++_preferencesRefreshGeneration;
+    NSUInteger preferenceGeneration = ++_preferencesGeneration;
     os_unfair_lock_unlock(&_stateLock);
 
-    VCPreferences *preferences = [VCPreferences sharedPreferences];
-    BOOL eligible = NO;
-    BOOL systemPipelineReplacementConfigured = NO;
-    NSURL *requestedURL = nil;
-    NSInteger preferredFPS = 60;
-    CGFloat jpegQuality = 1.0;
-    BOOL aspectFill = YES;
-    NSInteger sourceRotation = 0;
-    BOOL mirrorSource = NO;
-    NSInteger maximumPixelDimension = 1920;
-    BOOL holdLastFrame = YES;
-    NSTimeInterval staleFrameTimeout = 8.0;
+    VCPreferences *preferences = VCPreferences.sharedPreferences;
+    [preferences reload];
+    __block BOOL enabled = NO;
+    __block VCSourceType sourceType = VCSourceTypeNetwork;
+    __block NSURL *networkURL = nil;
+    __block NSURL *localURL = nil;
+    __block BOOL loopLocalMedia = YES;
+    __block NSInteger fps = 60;
+    __block CGFloat jpegQuality = 1.0;
+    __block BOOL aspectFill = YES;
+    __block NSInteger rotation = 0;
+    __block BOOL mirror = NO;
+    __block BOOL holdLastFrame = YES;
+    __block NSTimeInterval staleTimeout = 8.0;
+    __block NSInteger maximumPixelDimension = 1920;
+    __block NSString *sourceIdentity = nil;
     @synchronized (preferences) {
-        [preferences reload];
-        eligible = [self processMatchesPreferences:preferences];
-        systemPipelineReplacementConfigured = preferences.isEnabled &&
-            preferences.streamURL != nil && !preferences.compatibilityMode;
-        requestedURL = (eligible && preferences.isEnabled) ? preferences.streamURL : nil;
-        preferredFPS = preferences.preferredFPS;
+        sourceType = preferences.sourceType;
+        networkURL = preferences.streamURL;
+        localURL = preferences.localMediaURL;
+        loopLocalMedia = preferences.loopLocalMedia;
+        fps = preferences.preferredFPS;
         jpegQuality = preferences.jpegQuality;
         aspectFill = preferences.aspectFill;
-        sourceRotation = preferences.sourceRotation;
-        mirrorSource = preferences.mirrorSource;
-        maximumPixelDimension = preferences.maximumPixelDimension;
+        rotation = preferences.sourceRotation;
+        mirror = preferences.mirrorSource;
         holdLastFrame = preferences.holdLastFrame;
-        staleFrameTimeout = preferences.staleFrameTimeout;
+        staleTimeout = preferences.staleFrameTimeout;
+        maximumPixelDimension = preferences.maximumPixelDimension;
+        sourceIdentity = [self sourceIdentityForPreferences:preferences];
+        enabled = preferences.isEnabled && sourceIdentity.length > 0;
     }
 
-    // Photo hooks can run before the main-queue stream transition block. Publish
-    // this read-only routing fact immediately so an early system-pipeline photo
-    // is not mistaken for an inactive capture.
+    // Network frames are already authored by the sender. Screen capture follows
+    // the display. Only local files are transformed/rate-limited/resized here.
+    BOOL localMediaControlsActive = sourceType == VCSourceTypeLocalMedia;
+    NSInteger effectiveFPS = localMediaControlsActive ? fps
+        : (sourceType == VCSourceTypeNetwork ? 240 : 60);
+    CGFloat effectiveJPEGQuality = localMediaControlsActive ? jpegQuality : 1.0;
+    BOOL effectiveAspectFill = localMediaControlsActive ? aspectFill : YES;
+    NSInteger effectiveRotation = localMediaControlsActive ? rotation : 0;
+    BOOL effectiveMirror = localMediaControlsActive ? mirror : NO;
+    NSInteger effectiveMaximumPixelDimension = localMediaControlsActive
+        ? maximumPixelDimension : 4096;
+
+    BOOL transformChanged = NO;
+    BOOL localDecodeSizeChanged = NO;
+    BOOL localRateChanged = NO;
     os_unfair_lock_lock(&_stateLock);
-    if (refreshGeneration == _preferencesRefreshGeneration) {
-        _systemPipelineReplacementConfigured = systemPipelineReplacementConfigured;
+    if (preferenceGeneration == _preferencesGeneration) {
+        transformChanged = _configuredSourceRotation != effectiveRotation ||
+                           _configuredMirrorSource != effectiveMirror;
+        localDecodeSizeChanged = _configuredMaximumPixelDimension !=
+                                 effectiveMaximumPixelDimension;
+        localRateChanged = localMediaControlsActive &&
+                           _configuredFPS != effectiveFPS;
+        if (transformChanged) _transformGeneration++;
+        _replacementEnabled = enabled;
+        _configuredSourceType = sourceType;
+        _configuredFPS = effectiveFPS;
+        _configuredJPEGQuality = effectiveJPEGQuality;
+        _configuredAspectFill = effectiveAspectFill;
+        _configuredMaximumPixelDimension = effectiveMaximumPixelDimension;
+        _configuredSourceRotation = effectiveRotation;
+        _configuredMirrorSource = effectiveMirror;
+        _configuredHoldLastFrame = holdLastFrame;
+        _configuredStaleFrameTimeout = staleTimeout;
     }
     os_unfair_lock_unlock(&_stateLock);
+    if (!_producerProcess) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        BOOL sameActiveStream = requestedURL && self.adapter &&
-            [self.activeURL isEqual:requestedURL];
-        BOOL streamChanged = (requestedURL || self.activeURL) && !sameActiveStream;
-        BOOL transformChanged = NO;
-        NSUInteger streamGeneration = 0;
         os_unfair_lock_lock(&self->_stateLock);
-        if (refreshGeneration != self->_preferencesRefreshGeneration) {
-            os_unfair_lock_unlock(&self->_stateLock);
+        BOOL current = preferenceGeneration == self->_preferencesGeneration;
+        os_unfair_lock_unlock(&self->_stateLock);
+        if (!current) return;
+
+        BOOL sameSource = enabled && [self.activeSourceIdentity isEqual:sourceIdentity];
+        if (sameSource && !transformChanged && !localDecodeSizeChanged &&
+            !localRateChanged) {
+            self.screenSource.preferredFPS = 60;
+            self.localSource.loops = loopLocalMedia;
+            self.localSource.preferredFPS = effectiveFPS;
             return;
         }
-        transformChanged = self->_configuredSourceRotation != sourceRotation ||
-                           self->_configuredMirrorSource != mirrorSource;
-        if (streamChanged) self->_streamGeneration++;
-        if (transformChanged) self->_transformGeneration++;
-        self->_replacementEnabled = requestedURL != nil;
-        self->_systemPipelineReplacementConfigured = systemPipelineReplacementConfigured;
-        self->_configuredFPS = preferredFPS;
-        self->_configuredJPEGQuality = jpegQuality;
-        self->_configuredAspectFill = aspectFill;
-        self->_configuredSourceRotation = sourceRotation;
-        self->_configuredMirrorSource = mirrorSource;
-        self->_configuredHoldLastFrame = holdLastFrame;
-        self->_configuredStaleFrameTimeout = staleFrameTimeout;
-        streamGeneration = self->_streamGeneration;
-        os_unfair_lock_unlock(&self->_stateLock);
 
-        if (transformChanged && !streamChanged) {
-            [self clearLatestPixelBuffer];
-            if (requestedURL) [self publishStreamStatus:VCStreamStatusConnecting];
-        }
-
-        if (!requestedURL) {
-            AVAssetStreamAdapter *oldAdapter = self.adapter;
-            self.adapter = nil;
-            self.activeURL = nil;
-            oldAdapter.pixelBufferCallback = nil;
-            oldAdapter.errorCallback = nil;
-            [oldAdapter stopStreaming];
-            [self clearLatestPixelBuffer];
+        [self stopAllSourcesAndInvalidateBus];
+        if (!enabled) {
             [self publishStreamStatus:VCStreamStatusDisabled];
             return;
         }
-
-        if (self.adapter && [self.activeURL isEqual:requestedURL]) {
-            self.adapter.preferredFPS = preferredFPS;
-            self.adapter.maximumPixelDimension = maximumPixelDimension;
-            if (!self.adapter.isRunning) {
-                [self publishStreamStatus:VCStreamStatusConnecting];
-                [self.adapter startStreaming];
-            }
-            return;
-        }
-
-        AVAssetStreamAdapter *oldAdapter = self.adapter;
-        self.adapter = nil;
-        oldAdapter.pixelBufferCallback = nil;
-        oldAdapter.errorCallback = nil;
-        [oldAdapter stopStreaming];
-        [self clearLatestPixelBuffer];
-
-        AVAssetStreamAdapter *adapter = [[AVAssetStreamAdapter alloc] initWithURL:requestedURL];
-        adapter.preferredFPS = preferredFPS;
-        adapter.maximumPixelDimension = maximumPixelDimension;
-        __weak VCStreamCoordinator *weakSelf = self;
-        adapter.pixelBufferCallback = ^(CVPixelBufferRef pixelBuffer) {
-            VCStreamCoordinator *strongSelf = weakSelf;
-            if (!strongSelf) return;
-            [strongSelf enqueueLatestPixelBuffer:pixelBuffer
-                                streamGeneration:streamGeneration];
-        };
-        __weak AVAssetStreamAdapter *weakAdapter = adapter;
-        adapter.errorCallback = ^(NSError *error) {
-            VCStreamCoordinator *strongSelf = weakSelf;
-            AVAssetStreamAdapter *strongAdapter = weakAdapter;
-            if (!strongSelf || !strongAdapter || strongSelf.adapter != strongAdapter) return;
-            [strongSelf publishStreamStatus:[strongSelf hasUsableReplacementFrame]
-                ? VCStreamStatusHoldingLastFrame
-                : VCStreamStatusError];
-            NSLog(@"[VirtualCamPro] Stream error: %@", error.localizedDescription);
-        };
-
-        self.activeURL = requestedURL;
-        self.adapter = adapter;
+        self.activeSourceIdentity = sourceIdentity;
+        os_unfair_lock_lock(&self->_stateLock);
+        NSUInteger sourceGeneration = ++self->_sourceGeneration;
+        self->_loggedFirstFrame = NO;
+        self->_loggedStaleFrame = NO;
+        os_unfair_lock_unlock(&self->_stateLock);
         [self publishStreamStatus:VCStreamStatusConnecting];
-        [adapter startStreaming];
+
+        if (sourceType == VCSourceTypeScreen) {
+            VCScreenCaptureSource *source = [VCScreenCaptureSource new];
+            source.preferredFPS = 60;
+            __weak VCStreamCoordinator *weakSelf = self;
+            source.frameCallback = ^(CVPixelBufferRef pixelBuffer) {
+                [weakSelf enqueueLatestPixelBuffer:pixelBuffer
+                                  sourceGeneration:sourceGeneration];
+            };
+            source.errorCallback = ^(NSError *error) {
+                [weakSelf producerFailedWithError:error];
+            };
+            self.screenSource = source;
+            [source start];
+        } else if (sourceType == VCSourceTypeLocalMedia) {
+            NSInteger playlistIndex = NSNotFound;
+            self.localMediaPlaylist = VCLocalVideoPlaylistForURL(localURL, &playlistIndex);
+            self.localMediaPlaylistIndex = playlistIndex;
+            VCLocalMediaSource *source = [[VCLocalMediaSource alloc] initWithFileURL:localURL];
+            source.loops = loopLocalMedia;
+            source.preferredFPS = effectiveFPS;
+            source.maximumPixelDimension = effectiveMaximumPixelDimension;
+            __weak VCStreamCoordinator *weakSelf = self;
+            source.videoCallback = ^(CVPixelBufferRef pixelBuffer) {
+                [weakSelf enqueueLatestPixelBuffer:pixelBuffer
+                                  sourceGeneration:sourceGeneration];
+            };
+            source.audioCallback = ^(const float *samples, NSUInteger frameCount) {
+                VCStreamCoordinator *strongSelf = weakSelf;
+                if (!strongSelf || ![strongSelf sourceGenerationIsCurrent:sourceGeneration]) return;
+                if ([[VCSharedAudioServer sharedServer]
+                        publishInterleavedStereoSamples:samples frameCount:frameCount]) {
+                    [strongSelf publishStreamStatus:VCStreamStatusReceiving];
+                }
+            };
+            source.errorCallback = ^(NSError *error) {
+                [weakSelf producerFailedWithError:error];
+            };
+            self.localSource = source;
+            [source start];
+        } else {
+            AVAssetStreamAdapter *source = [[AVAssetStreamAdapter alloc] initWithURL:networkURL];
+            __weak VCStreamCoordinator *weakSelf = self;
+            source.pixelBufferCallback = ^(CVPixelBufferRef pixelBuffer) {
+                [weakSelf enqueueLatestPixelBuffer:pixelBuffer
+                                  sourceGeneration:sourceGeneration];
+            };
+            source.errorCallback = ^(NSError *error) {
+                [weakSelf producerFailedWithError:error];
+            };
+            self.networkSource = source;
+            [source startStreaming];
+        }
     });
+}
+
+- (BOOL)sourceGenerationIsCurrent:(NSUInteger)generation {
+    os_unfair_lock_lock(&_stateLock);
+    BOOL current = _replacementEnabled && _sourceGeneration == generation;
+    os_unfair_lock_unlock(&_stateLock);
+    return current;
+}
+
+- (void)producerFailedWithError:(NSError *)error {
+    BOOL holding = [[VCSharedVideoClient sharedClient]
+        hasPublishedFrameWithMaximumAge:365.0 * 24.0 * 60.0 * 60.0];
+    [self publishStreamStatus:holding ? VCStreamStatusHoldingLastFrame
+                                      : VCStreamStatusError];
+    NSLog(@"[VirtualCamPro] Source error: %@", error.localizedDescription);
 }
 
 - (void)enqueueLatestPixelBuffer:(CVPixelBufferRef)pixelBuffer
-                 streamGeneration:(NSUInteger)streamGeneration {
+                sourceGeneration:(NSUInteger)sourceGeneration {
     if (!pixelBuffer) return;
-    CVPixelBufferRef retainedBuffer = CVPixelBufferRetain(pixelBuffer);
-    CVPixelBufferRef replacedPendingBuffer = NULL;
-    BOOL shouldSchedule = NO;
+    CVPixelBufferRef retained = CVPixelBufferRetain(pixelBuffer);
+    CVPixelBufferRef retired = NULL;
+    BOOL schedule = NO;
     os_unfair_lock_lock(&_stateLock);
-    if (!_replacementEnabled || streamGeneration != _streamGeneration) {
+    if (!_replacementEnabled || sourceGeneration != _sourceGeneration) {
         os_unfair_lock_unlock(&_stateLock);
-        CVPixelBufferRelease(retainedBuffer);
+        CVPixelBufferRelease(retained);
         return;
     }
-    replacedPendingBuffer = _pendingPixelBuffer;
-    _pendingPixelBuffer = retainedBuffer;
-    _pendingStreamGeneration = streamGeneration;
-    if (replacedPendingBuffer) _coalescedFrameCount++;
+    retired = _pendingPixelBuffer;
+    _pendingPixelBuffer = retained;
+    _pendingSourceGeneration = sourceGeneration;
     if (!_frameProcessingScheduled) {
         _frameProcessingScheduled = YES;
-        shouldSchedule = YES;
+        schedule = YES;
     }
     os_unfair_lock_unlock(&_stateLock);
-    if (replacedPendingBuffer) CVPixelBufferRelease(replacedPendingBuffer);
-    if (!shouldSchedule) return;
-
+    if (retired) CVPixelBufferRelease(retired);
+    if (!schedule) return;
     __weak VCStreamCoordinator *weakSelf = self;
-    dispatch_async(self.frameProcessingQueue, ^{
-        [weakSelf processPendingPixelBuffers];
-    });
+    dispatch_async(self.frameProcessingQueue, ^{ [weakSelf processPendingFrames]; });
 }
 
-- (void)processPendingPixelBuffers {
+- (void)processPendingFrames {
     while (YES) {
-        CVPixelBufferRef pixelBuffer = NULL;
-        NSUInteger streamGeneration = 0;
-        NSUInteger processingGeneration = 0;
-        NSUInteger coalescedFrameCount = 0;
+        CVPixelBufferRef input = NULL;
+        NSUInteger sourceGeneration = 0;
+        NSUInteger transformGeneration = 0;
+        NSInteger rotation = 0;
+        BOOL mirror = NO;
         os_unfair_lock_lock(&_stateLock);
-        pixelBuffer = _pendingPixelBuffer;
+        input = _pendingPixelBuffer;
         _pendingPixelBuffer = NULL;
-        if (!pixelBuffer) {
+        if (!input) {
             _frameProcessingScheduled = NO;
             os_unfair_lock_unlock(&_stateLock);
             return;
         }
-        streamGeneration = _pendingStreamGeneration;
-        processingGeneration = _frameProcessingGeneration;
+        sourceGeneration = _pendingSourceGeneration;
+        transformGeneration = _transformGeneration;
+        rotation = _configuredSourceRotation;
+        mirror = _configuredMirrorSource;
+        os_unfair_lock_unlock(&_stateLock);
+
+        CVPixelBufferRef transformed = VCCopyPixelBufferApplyingOrientation(input,
+                                                                             rotation,
+                                                                             mirror);
+        if (!transformed) transformed = CVPixelBufferRetain(input);
+        CVPixelBufferRelease(input);
+
+        os_unfair_lock_lock(&_stateLock);
+        BOOL current = _replacementEnabled && sourceGeneration == _sourceGeneration &&
+                       transformGeneration == _transformGeneration;
+        BOOL firstFrame = current && !_loggedFirstFrame;
+        if (firstFrame) _loggedFirstFrame = YES;
+        os_unfair_lock_unlock(&_stateLock);
+        if (current && [[VCSharedVideoServer sharedServer] publishPixelBuffer:transformed]) {
+            [self publishStreamStatus:VCStreamStatusReceiving];
+            if (firstFrame) {
+                NSLog(@"[VirtualCamPro] SpringBoard published first shared frame: %zux%zu/%u",
+                      CVPixelBufferGetWidth(transformed),
+                      CVPixelBufferGetHeight(transformed),
+                      (unsigned int)CVPixelBufferGetPixelFormatType(transformed));
+            }
+        }
+        CVPixelBufferRelease(transformed);
+    }
+}
+
+- (BOOL)handleLocalMediaVolumeButtonDirection:(NSInteger)direction {
+    if (!_producerProcess || direction == 0) return NO;
+    __block NSURL *nextURL = nil;
+    @synchronized (self) {
+        os_unfair_lock_lock(&_stateLock);
+        BOOL active = _replacementEnabled &&
+                      _configuredSourceType == VCSourceTypeLocalMedia;
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (_coalescedFrameCount > 0 &&
-            (_lastCoalescingLogTime <= 0 || now - _lastCoalescingLogTime >= 10.0)) {
-            coalescedFrameCount = _coalescedFrameCount;
-            _coalescedFrameCount = 0;
-            _lastCoalescingLogTime = now;
-        }
+        BOOL debounced = _lastVolumeButtonActionTime > 0 &&
+                         now - _lastVolumeButtonActionTime < 0.35;
         os_unfair_lock_unlock(&_stateLock);
-
-        if (coalescedFrameCount > 0) {
-            NSLog(@"[VirtualCamPro] Coalesced %lu intermediate network frames to preserve low latency",
-                  (unsigned long)coalescedFrameCount);
+        NSInteger count = (NSInteger)self.localMediaPlaylist.count;
+        if (!active || count == 0) return NO;
+        // Consume key-repeat events while a local playlist owns the buttons, but
+        // advance at most once per deliberate click.
+        if (debounced) return YES;
+        NSInteger current = self.localMediaPlaylistIndex;
+        if (current == NSNotFound) {
+            current = direction > 0 ? 0 : count - 1;
+        } else if (count < 2) {
+            return NO;
+        } else {
+            current = (current + (direction > 0 ? 1 : -1) + count) % count;
         }
-        [self storeLatestPixelBuffer:pixelBuffer
-                     streamGeneration:streamGeneration
-                 processingGeneration:processingGeneration];
-        CVPixelBufferRelease(pixelBuffer);
+        nextURL = self.localMediaPlaylist[(NSUInteger)current];
+        self.localMediaPlaylistIndex = current;
+        os_unfair_lock_lock(&_stateLock);
+        _lastVolumeButtonActionTime = now;
+        os_unfair_lock_unlock(&_stateLock);
     }
+    if (!nextURL) return NO;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CFPreferencesSetAppValue((__bridge CFStringRef)VCLocalMediaPathKey,
+                                 (__bridge CFStringRef)nextURL.path,
+                                 (__bridge CFStringRef)VCPreferencesDomain);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)VCPreferencesDomain);
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge CFStringRef)VCPreferencesChangedNotification,
+            NULL,
+            NULL,
+            YES);
+        NSLog(@"[VirtualCamPro] Volume button selected local video %@",
+              nextURL.lastPathComponent);
+    });
+    return YES;
 }
 
-- (void)storeLatestPixelBuffer:(CVPixelBufferRef)pixelBuffer
-               streamGeneration:(NSUInteger)streamGeneration
-           processingGeneration:(NSUInteger)processingGeneration {
-    if (!pixelBuffer) return;
-    NSInteger sourceRotation = 0;
-    BOOL mirrorSource = NO;
-    NSUInteger transformGeneration = 0;
+- (void)stopAllSourcesAndInvalidateBus {
+    AVAssetStreamAdapter *network = self.networkSource;
+    VCScreenCaptureSource *screen = self.screenSource;
+    VCLocalMediaSource *local = self.localSource;
+    self.networkSource = nil;
+    self.screenSource = nil;
+    self.localSource = nil;
+    self.localMediaPlaylist = @[];
+    self.localMediaPlaylistIndex = NSNotFound;
+    self.activeSourceIdentity = nil;
+    network.pixelBufferCallback = nil;
+    network.errorCallback = nil;
+    screen.frameCallback = nil;
+    screen.errorCallback = nil;
+    local.videoCallback = nil;
+    local.audioCallback = nil;
+    local.errorCallback = nil;
+    [network stopStreaming];
+    [screen stop];
+    [local stop];
     os_unfair_lock_lock(&_stateLock);
-    if (!_replacementEnabled || streamGeneration != _streamGeneration ||
-        processingGeneration != _frameProcessingGeneration) {
-        os_unfair_lock_unlock(&_stateLock);
-        return;
-    }
-    sourceRotation = _configuredSourceRotation;
-    mirrorSource = _configuredMirrorSource;
-    transformGeneration = _transformGeneration;
+    _sourceGeneration++;
     os_unfair_lock_unlock(&_stateLock);
-
-    CVPixelBufferRef retainedBuffer = VCCopyPixelBufferApplyingOrientation(pixelBuffer,
-                                                                            sourceRotation,
-                                                                            mirrorSource);
-    if (!retainedBuffer) retainedBuffer = CVPixelBufferRetain(pixelBuffer);
-    size_t retainedWidth = CVPixelBufferGetWidth(retainedBuffer);
-    size_t retainedHeight = CVPixelBufferGetHeight(retainedBuffer);
-    OSType retainedPixelFormat = CVPixelBufferGetPixelFormatType(retainedBuffer);
-    NSInteger configuredFPS = 60;
-    CVPixelBufferRef oldBuffer = NULL;
-    BOOL shouldLogFirstFrame = NO;
-    os_unfair_lock_lock(&_stateLock);
-    if (!_replacementEnabled || streamGeneration != _streamGeneration ||
-        transformGeneration != _transformGeneration ||
-        processingGeneration != _frameProcessingGeneration) {
-        os_unfair_lock_unlock(&_stateLock);
-        CVPixelBufferRelease(retainedBuffer);
-        return;
-    }
-    shouldLogFirstFrame = !_loggedFirstFrame;
-    configuredFPS = _configuredFPS;
-    _loggedFirstFrame = YES;
-    _loggedStaleFrame = NO;
-    oldBuffer = _latestPixelBuffer;
-    _latestPixelBuffer = retainedBuffer;
-    _latestFrameTime = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_unlock(&_stateLock);
-    if (oldBuffer) CVPixelBufferRelease(oldBuffer);
-    [self publishStreamStatus:VCStreamStatusReceiving];
-    if (shouldLogFirstFrame) {
-        NSLog(@"[VirtualCamPro] First network frame: %zux%zu pixel format %u, rotation %ld, "
-               @"mirrored %@, decode/preview cap %ld FPS",
-              retainedWidth,
-              retainedHeight,
-              (unsigned int)retainedPixelFormat,
-              (long)sourceRotation,
-              mirrorSource ? @"yes" : @"no",
-              (long)configuredFPS);
-    }
+    [self clearPendingAndCompatibilityFrames];
+    [[VCSharedVideoServer sharedServer] invalidate];
+    [[VCSharedAudioServer sharedServer] invalidate];
 }
 
-- (void)clearLatestPixelBuffer {
-    CVPixelBufferRef oldBuffer = NULL;
-    CVPixelBufferRef pendingBuffer = NULL;
-    CVPixelBufferRef compatibilityOutputBuffer = NULL;
+- (void)clearPendingAndCompatibilityFrames {
+    CVPixelBufferRef pending = NULL;
+    CVPixelBufferRef compatibility = NULL;
     os_unfair_lock_lock(&_stateLock);
-    oldBuffer = _latestPixelBuffer;
-    pendingBuffer = _pendingPixelBuffer;
-    compatibilityOutputBuffer = _latestCompatibilityOutputPixelBuffer;
-    _latestPixelBuffer = NULL;
+    pending = _pendingPixelBuffer;
+    compatibility = _latestCompatibilityOutputPixelBuffer;
     _pendingPixelBuffer = NULL;
     _latestCompatibilityOutputPixelBuffer = NULL;
-    _latestFrameTime = 0;
     _latestCompatibilityOutputTime = 0;
     _compatibilityOutputPathActive = NO;
-    _frameProcessingGeneration++;
-    _coalescedFrameCount = 0;
     _loggedFirstFrame = NO;
     _loggedStaleFrame = NO;
     os_unfair_lock_unlock(&_stateLock);
-    if (oldBuffer) CVPixelBufferRelease(oldBuffer);
-    if (pendingBuffer) CVPixelBufferRelease(pendingBuffer);
-    if (compatibilityOutputBuffer) CVPixelBufferRelease(compatibilityOutputBuffer);
+    if (pending) CVPixelBufferRelease(pending);
+    if (compatibility) CVPixelBufferRelease(compatibility);
     VCResetFrameConverterCache();
 }
 
 - (void)publishCompatibilityOutputPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    CVPixelBufferRef retainedBuffer = pixelBuffer ? CVPixelBufferRetain(pixelBuffer) : NULL;
-    CVPixelBufferRef oldBuffer = NULL;
+    CVPixelBufferRef retained = pixelBuffer ? CVPixelBufferRetain(pixelBuffer) : NULL;
+    CVPixelBufferRef retired = NULL;
     os_unfair_lock_lock(&_stateLock);
-    oldBuffer = _latestCompatibilityOutputPixelBuffer;
-    _latestCompatibilityOutputPixelBuffer = retainedBuffer;
+    retired = _latestCompatibilityOutputPixelBuffer;
+    _latestCompatibilityOutputPixelBuffer = retained;
     _latestCompatibilityOutputTime = CFAbsoluteTimeGetCurrent();
     _compatibilityOutputPathActive = YES;
     os_unfair_lock_unlock(&_stateLock);
-    if (oldBuffer) CVPixelBufferRelease(oldBuffer);
+    if (retired) CVPixelBufferRelease(retired);
 }
 
 - (CVPixelBufferRef)copyLatestCompatibilityOutputPixelBufferWithActivePath:
     (BOOL *)activePath {
-    CVPixelBufferRef pixelBuffer = NULL;
-    CVPixelBufferRef staleBuffer = NULL;
+    CVPixelBufferRef result = NULL;
+    CVPixelBufferRef stale = NULL;
     os_unfair_lock_lock(&_stateLock);
-    BOOL recentOutputPath = _replacementEnabled && _compatibilityOutputPathActive &&
+    BOOL recent = _replacementEnabled && _compatibilityOutputPathActive &&
         _latestCompatibilityOutputTime > 0 &&
         CFAbsoluteTimeGetCurrent() - _latestCompatibilityOutputTime <= 2.0;
-    if (!recentOutputPath && _compatibilityOutputPathActive) {
-        staleBuffer = _latestCompatibilityOutputPixelBuffer;
+    if (!recent && _compatibilityOutputPathActive) {
+        stale = _latestCompatibilityOutputPixelBuffer;
         _latestCompatibilityOutputPixelBuffer = NULL;
         _latestCompatibilityOutputTime = 0;
         _compatibilityOutputPathActive = NO;
     }
-    if (activePath) *activePath = recentOutputPath;
-    if (recentOutputPath && _latestCompatibilityOutputPixelBuffer) {
-        pixelBuffer = CVPixelBufferRetain(_latestCompatibilityOutputPixelBuffer);
+    if (activePath) *activePath = recent;
+    if (recent && _latestCompatibilityOutputPixelBuffer) {
+        result = CVPixelBufferRetain(_latestCompatibilityOutputPixelBuffer);
     }
     os_unfair_lock_unlock(&_stateLock);
-    if (staleBuffer) CVPixelBufferRelease(staleBuffer);
-    return pixelBuffer;
+    if (stale) CVPixelBufferRelease(stale);
+    return result;
 }
 
 - (CVPixelBufferRef)copyLatestPixelBuffer {
     return [self copyLatestPixelBufferWithAspectFill:NULL preferredFPS:NULL];
 }
 
-- (BOOL)hasUsableReplacementFrame {
-    os_unfair_lock_lock(&_stateLock);
-    BOOL usable = _replacementEnabled && _latestPixelBuffer &&
-        (_configuredHoldLastFrame ||
-         (_latestFrameTime > 0 &&
-          CFAbsoluteTimeGetCurrent() - _latestFrameTime <= _configuredStaleFrameTimeout));
-    os_unfair_lock_unlock(&_stateLock);
-    return usable;
-}
-
 - (CVPixelBufferRef)copyLatestPixelBufferWithAspectFill:(BOOL *)aspectFill
                                            preferredFPS:(NSInteger *)preferredFPS {
-    BOOL shouldLogStaleFrame = NO;
-    CVPixelBufferRef pixelBuffer = NULL;
+    BOOL enabled = NO;
+    BOOL hold = NO;
+    NSTimeInterval staleTimeout = 0;
+    BOOL logStale = NO;
     os_unfair_lock_lock(&_stateLock);
     if (aspectFill) *aspectFill = _configuredAspectFill;
     if (preferredFPS) *preferredFPS = _configuredFPS;
-    if (_replacementEnabled) {
-        if (!_configuredHoldLastFrame && _latestFrameTime > 0 &&
-            CFAbsoluteTimeGetCurrent() - _latestFrameTime > _configuredStaleFrameTimeout) {
-            shouldLogStaleFrame = !_loggedStaleFrame;
-            _loggedStaleFrame = YES;
-        } else {
-            pixelBuffer = _latestPixelBuffer ? CVPixelBufferRetain(_latestPixelBuffer) : NULL;
+    enabled = _replacementEnabled;
+    hold = _configuredHoldLastFrame;
+    staleTimeout = _configuredStaleFrameTimeout;
+    os_unfair_lock_unlock(&_stateLock);
+    if (!enabled) return NULL;
+    NSTimeInterval maximumAge = hold ? 365.0 * 24.0 * 60.0 * 60.0 : staleTimeout;
+    CVPixelBufferRef result = [[VCSharedVideoClient sharedClient]
+        copyLatestPixelBufferWithMaximumAge:maximumAge];
+    if (!result && !hold) {
+        os_unfair_lock_lock(&_stateLock);
+        logStale = !_loggedStaleFrame;
+        _loggedStaleFrame = YES;
+        os_unfair_lock_unlock(&_stateLock);
+        if (logStale) {
+            NSLog(@"[VirtualCamPro] Shared frame is stale; preserving the physical camera frame");
         }
     }
-    os_unfair_lock_unlock(&_stateLock);
-    if (shouldLogStaleFrame) {
-        NSLog(@"[VirtualCamPro] Latest network frame is stale; preserving real camera output");
-    }
-    return pixelBuffer;
+    return result;
 }
 
 - (BOOL)isReplacementActive {
     os_unfair_lock_lock(&_stateLock);
-    BOOL value = _replacementEnabled;
+    BOOL enabled = _replacementEnabled;
+    BOOL hold = _configuredHoldLastFrame;
+    NSTimeInterval timeout = _configuredStaleFrameTimeout;
     os_unfair_lock_unlock(&_stateLock);
-    return value;
+    return enabled && [[VCSharedVideoClient sharedClient]
+        hasPublishedFrameWithMaximumAge:hold ? 365.0 * 24.0 * 60.0 * 60.0 : timeout];
 }
 
 - (BOOL)isSystemPipelineReplacementConfigured {
     os_unfair_lock_lock(&_stateLock);
-    BOOL value = _systemPipelineReplacementConfigured;
+    BOOL enabled = _replacementEnabled;
     os_unfair_lock_unlock(&_stateLock);
-    return value;
+    return enabled;
 }
 
 - (NSInteger)preferredFPS {
@@ -568,10 +693,9 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
 - (void)dealloc {
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)self);
-    [self.adapter stopStreaming];
-    [self clearLatestPixelBuffer];
+    if (_producerProcess) [self stopAllSourcesAndInvalidateBus];
+    else [self clearPendingAndCompatibilityFrames];
     if (self.memoryPressureSource) dispatch_source_cancel(self.memoryPressureSource);
-    if (_streamStatusToken != VCInvalidNotifyToken) notify_cancel(_streamStatusToken);
+    if (_streamStatusToken >= 0) notify_cancel(_streamStatusToken);
 }
-
 @end

@@ -2,6 +2,7 @@
 
 #import <CoreImage/CoreImage.h>
 #import <ImageIO/ImageIO.h>
+#import <IOSurface/IOSurface.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <os/lock.h>
 
@@ -158,7 +159,9 @@ static CVPixelBufferPoolRef VCLockedPixelBufferPool(size_t width,
         (id)kCVPixelBufferWidthKey: @(width),
         (id)kCVPixelBufferHeightKey: @(height),
         (id)kCVPixelBufferPixelFormatTypeKey: @(pixelFormat),
-        (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+        (id)kCVPixelBufferIOSurfacePropertiesKey: @{
+            (id)kIOSurfaceIsGlobal: @YES,
+        },
         (id)kCVPixelBufferMetalCompatibilityKey: @YES,
     };
     CVPixelBufferPoolRef createdPool = NULL;
@@ -342,6 +345,18 @@ CVPixelBufferRef VCCopyPixelBufferMatchingTemplate(CVPixelBufferRef source,
     return VCCopyPixelBufferMatchingTemplateAndDescription(source,
                                                             templateBuffer,
                                                             aspectFill,
+                                                            NULL,
+                                                            NULL);
+}
+
+CVPixelBufferRef VCCopyStablePixelBuffer(CVPixelBufferRef source) {
+    if (!source) return NULL;
+    // Even when the source already has the requested format, the transfer
+    // path allocates different backing storage. This lets the caller release
+    // its IOSurface use-count lease immediately after this synchronous copy.
+    return VCCopyPixelBufferMatchingTemplateAndDescription(source,
+                                                            source,
+                                                            YES,
                                                             NULL,
                                                             NULL);
 }

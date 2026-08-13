@@ -136,7 +136,17 @@ try {
                 continue
             }
             if ($method -notin @("GET", "HEAD")) {
-                Send-SimpleResponse -Stream $stream -StatusCode 405 -Reason "Method Not Allowed" -Body "Method Not Allowed"
+                $bodyBytes = [Text.Encoding]::UTF8.GetBytes("Method Not Allowed")
+                Write-HttpResponseHeader -Stream $stream -StatusCode 405 -Reason "Method Not Allowed" -Headers @{
+                    "Content-Type" = "text/plain; charset=utf-8"
+                    "Content-Length" = [string]$bodyBytes.Length
+                    "Allow" = "GET, HEAD, OPTIONS"
+                    "Cache-Control" = "no-store"
+                    "Access-Control-Allow-Origin" = "*"
+                    "X-Content-Type-Options" = "nosniff"
+                    "Connection" = "close"
+                }
+                $stream.Write($bodyBytes, 0, $bodyBytes.Length)
                 continue
             }
 
@@ -206,6 +216,11 @@ try {
                             Write-HttpResponseHeader -Stream $stream -StatusCode 416 -Reason "Range Not Satisfiable" -Headers @{
                                 "Content-Range" = "bytes */$length"
                                 "Content-Length" = "0"
+                                "Accept-Ranges" = "bytes"
+                                "Access-Control-Allow-Origin" = "*"
+                                "Access-Control-Expose-Headers" = "Content-Length, Content-Range, Accept-Ranges"
+                                "Cache-Control" = "no-store"
+                                "X-Content-Type-Options" = "nosniff"
                                 "Connection" = "close"
                             }
                             continue

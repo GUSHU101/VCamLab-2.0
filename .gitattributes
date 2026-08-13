@@ -1,0 +1,12 @@
+* text=auto
+*.sh text eol=lf
+layout/DEBIAN/* text eol=lf
+*.plist text eol=lf
+*.m text eol=lf
+*.h text eol=lf
+*.x text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.deb binary

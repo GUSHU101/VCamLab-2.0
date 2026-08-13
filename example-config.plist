@@ -4,8 +4,12 @@
 <dict>
     <key>enabled</key>
     <true/>
-    <key>compatibilityMode</key>
-    <false/>
+    <key>sourceType</key>
+    <integer>0</integer>
+    <key>localMediaPath</key>
+    <string></string>
+    <key>loopLocalMedia</key>
+    <true/>
     <key>streamURL</key>
     <string>http://192.168.1.10:8888/live.mjpg</string>
     <key>preferredFPS</key>

@@ -9,7 +9,7 @@
 双击 `VirtualCamPro-Windows控制中心.bat`，即可在一个界面内完成：
 
 - 自动发现 `packages/` 或 `artifacts/` 中最新的 `.deb`，也可手动浏览选择；
-- 设置手机 IP、SSH 端口、1–240 的手机解码 FPS 目标、MJPEG/HLS 传输协议和可选自定义流 URL；
+- 设置手机 IP、SSH 端口、仅供手机本地文件使用的 1–240 FPS 上限、MJPEG/HLS 传输协议和可选自定义流 URL；
 - 点“环境预检”验证 SSH、rootless、`sudo` 和 `dpkg`；
 - 点“一键部署到手机”完成上传、包校验、安装、版本验证、临时文件清理和 URL/FPS 配置；
 - 点“验证安装”检查 `dpkg` 状态、架构、两个注入 dylib 与配置工具；
@@ -38,7 +38,7 @@ install-phone.bat 192.168.0.103
 工具按修改时间选择 `packages/` 或 `artifacts/` 中最新的 `com.murkaska.virtualcampro_*_iphoneos-arm64.deb`，显示本地 SHA-256，通过 SCP 复制到 `/var/mobile`，再在手机端核对上传字节数和完整 SHA-256，并由 `dpkg-deb` 验证包内 ID、版本和架构。只有全部一致才会使用 `mobile + sudo dpkg` 安装；无论验证或安装在哪一步失败，临时上传都会自动清理。也可以显式指定安装包和端口：
 
 ```bat
-install-phone.bat 192.168.0.103 "D:\Packages\com.murkaska.virtualcampro_2.8.0_iphoneos-arm64.deb" 22
+install-phone.bat 192.168.0.103 "D:\Packages\com.murkaska.virtualcampro_2.10.0_iphoneos-arm64.deb" 22
 ```
 
 希望安装后自动写入手机 URL 和启用替换时使用：
@@ -47,7 +47,7 @@ install-phone.bat 192.168.0.103 "D:\Packages\com.murkaska.virtualcampro_2.8.0_ip
 install-phone.bat --setup 192.168.0.103
 ```
 
-`--setup` 会根据 `VCAM_TRANSPORT` 自动生成 URL：MJPEG 使用 `http://电脑IP:8888/live.mjpg`，HLS 使用 `http://电脑IP:8888/live.m3u8`。默认把手机解码/预览处理设为完整 60 FPS，然后调用包内的 `virtualcampro-config` 原子写入偏好并发送实时通知。可用 `VCAM_PHONE_FPS`、`VCAM_STREAM_URL`、`VCAM_PORT` 和 `VCAM_TRANSPORT` 覆盖。安装器还会核对上传字节数及安装后的精确版本，成功后删除手机 `/var/mobile` 中的临时包。
+`--setup` 会根据 `VCAM_TRANSPORT` 自动生成 URL：MJPEG 使用 `http://电脑IP:8888/live.mjpg`，HLS 使用 `http://电脑IP:8888/live.m3u8`。同时保存的 60 FPS 默认值只在以后选择手机本地视频来源时生效；网络流始终采用发送端 FPS、分辨率、质量和方向。可用 `VCAM_PHONE_FPS`、`VCAM_STREAM_URL`、`VCAM_PORT` 和 `VCAM_TRANSPORT` 覆盖。
 如果显式填写 `VCAM_STREAM_URL`，工具会检查它与传输协议是否一致：HLS 必须使用 `.m3u8` URL；MJPEG 不能误填 `.m3u8`。协议与地址不匹配时会在写入手机前直接停止并给出错误。
 
 首次连接仍会保留 OpenSSH 的主机密钥确认，不会为了方便而关闭主机身份校验。可用 `VCAM_PHONE_HOST`、`VCAM_PHONE_PORT`、`VCAM_PHONE_USER`、`VCAM_DEB_PATH`、`VCAM_PHONE_FPS`、`VCAM_STREAM_URL` 和 `VCAM_TRANSPORT` 设置默认值。
@@ -128,22 +128,22 @@ start-stream.bat "D:\Videos\demo.mp4" portrait 720p 5 30 8888 hls
 | `VCAM_FPS` | `auto` | 自动读取 OBS FPS；也接受 1–240 的 `25`、`59.94`、`120`、`240` 或分数 |
 | `VCAM_TRANSPORT` | `mjpeg` | `mjpeg` 输出 `/live.mjpg`；`hls` 输出 H.264 `/live.m3u8` |
 | `VCAM_QUALITY` | `1` | 1–31，越小越清晰、带宽越高；默认 1 为编码器最高质量 |
-| `VCAM_HLS_SEGMENT_SECONDS` | `1` | HLS 分片时长，0.5–10 秒；越短通常延迟越低但请求更频繁 |
-| `VCAM_HLS_LIST_SIZE` | `4` | HLS 活动播放列表保留的分片数，2–30 |
+| `VCAM_HLS_SEGMENT_SECONDS` | `0.25` | HLS 分片时长，0.2–10 秒；越短通常延迟越低但请求更频繁 |
+| `VCAM_HLS_LIST_SIZE` | `6` | HLS 活动播放列表保留的分片数，6–30；Apple 直播兼容要求至少 6 段 |
 | `VCAM_HLS_VIDEO_BITRATE_KBPS` | `12000` | H.264 目标视频码率 kbps |
 | `VCAM_HLS_MAXRATE_KBPS` | `16000` | H.264 峰值码率上限 kbps |
-| `VCAM_HLS_BUFSIZE_KBPS` | `24000` | x264 VBV 缓冲 kbps |
-| `VCAM_HLS_PRESET` | `veryfast` | `ultrafast` 到 `medium`；越慢通常压缩效率越高、CPU 越重 |
+| `VCAM_HLS_BUFSIZE_KBPS` | `12000` | x264 低延迟 VBV 缓冲 kbps |
+| `VCAM_HLS_PRESET` | `ultrafast` | `ultrafast` 到 `medium`；越慢通常压缩效率越高、CPU 越重 |
 | `VCAM_SCALE_MODE` | `fill` | `fill` 等比放大后居中裁切、`fit` 等比补边、`stretch` 拉伸 |
 | `VCAM_BIND_ADDRESS` | `0.0.0.0` | 监听所有 IPv4 网卡；`127.0.0.1` 仅适合 USB 隧道 |
 | `VCAM_PORT` | `8888` | 1024–65535 |
 | `VCAM_OBS_WAIT_SECONDS` | `15` | 等待 OBS 实际出帧的最长秒数 |
 | `VCAM_RESTART_ON_DISCONNECT` | `true` | MJPEG 断开后重建监听器；HLS 模式用于 FFmpeg 编码器异常退出后的自动重启 |
-| `VCAM_RT_BUFFER_MB` | `256` | DirectShow 原始帧缓冲下限；按分辨率/FPS 自动扩到约半秒，最高 1024 MiB |
-| `VCAM_THREAD_QUEUE_SIZE` | `32` | 独立采集线程队列下限；高于 64 FPS 时自动扩到至少约半秒 |
-| `VCAM_ENCODER_THREADS` | `4` | MJPEG 并行编码线程；避免 FFmpeg 的单线程默认值成为瓶颈 |
-| `VCAM_OUTPUT_QUEUE_SIZE` | `64` | 已编码网络 FIFO 下限；随实际 FPS 自动扩到至少约一秒 |
-| `VCAM_TCP_SEND_BUFFER_MB` | `4` | Windows TCP 发送缓冲，同时启用 TCP_NODELAY 和 keepalive |
+| `VCAM_RT_BUFFER_MB` | `64` | DirectShow 原始帧短突发缓冲下限；按分辨率/FPS 扩到约 250 ms，最高 256 MiB |
+| `VCAM_THREAD_QUEUE_SIZE` | `4` | 独立采集线程队列下限；自动扩到约 250 ms、最多 60 帧 |
+| `VCAM_ENCODER_THREADS` | `4` | 软件 MJPEG 并行编码线程；硬件预检通过时可自动改用 Intel Quick Sync |
+| `VCAM_OUTPUT_QUEUE_SIZE` | `3` | 已编码网络 FIFO 下限；自动扩到约 150 ms、最多 36 帧，持续拥塞时丢弃旧包 |
+| `VCAM_TCP_SEND_BUFFER_MB` | `1` | Windows TCP 发送缓冲，同时启用 TCP_NODELAY 和 keepalive |
 | `VCAM_FFMPEG_LOG_LEVEL` | `error` | `error` 保持 GUI 简洁；排障时可设为 `warning` 或 `info` |
 | `VCAM_REQUIRE_OBS_MODE_MATCH` | `true` | 要求 OBS 发布模式与输出分辨率/FPS 完全匹配，否则拒绝启动 |
 | `VCAM_AUTO_REFRESH_OBS_VIRTUAL_CAMERA` | `true` | OBS 已运行时通过本机认证接口自动启动/刷新 Virtual Camera；不会结束 OBS |
@@ -155,7 +155,7 @@ OBS“设置 → 视频”的基础画布、输出分辨率和 FPS 必须与脚�
 
 自动读取的是“已保存配置”，DirectShow 检测的是“虚拟摄像机当前活动配置”。如果两者不同，启动器会同时显示，例如 `Saved OBS profile ... 1920x1080@60` 与 `OBS DirectShow modes ... 1020x1344@60`。本机控制接口可用时会自动停止/启动 Virtual Camera 并重新检测；接口关闭时才要求在 OBS 中手动切换一次。任何情况下都不会用旧活动模式静默推流。
 
-手机设置中的 FPS 不是凭空创建新的相机硬件档位，而是 1–240 的整数解码目标。29.97 FPS 的发送流可设为 30，59.94/60 设为 60；仅当 OBS Virtual Camera、目标相机格式和设备处理能力真实支持时才使用 120/240。iPhone 7 Plus 的屏幕预览按物理 60 Hz 显示，但网络解码和数据输出不被软件截到 60；`setup-config.sh URL FPS` 可写入完整范围。
+手机设置中的 FPS、解码质量、旋转和镜像只用于手机本地文件，不参与网络接收。网络 MJPEG/HLS 的方向、分辨率、帧率和画质全部由本 Windows 工具/OBS 的实际输出决定，音频继续使用手机原生麦克风。
 
 ## 恢复与退出码
 
@@ -195,8 +195,8 @@ standalone-self-test.bat
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-windows-standalone.ps1 `
-  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.8.0_iphoneos-arm64.deb" `
+  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.10.0_iphoneos-arm64.deb" `
   -CreateZip
 ```
 
-输出包含 GUI、三个命令行入口、可编辑配置、全部运行脚本、安装包、中文说明和 `standalone-manifest.json`，不依赖源码目录或 Git。
+指定 `-PackagePath` 时，输出包含 GUI、三个命令行入口、可编辑配置、全部运行脚本、安装包、中文说明和 `standalone-manifest.json`，不依赖源码目录或 Git。CI 使用 `-AllowMissingPackage` 生成不夹带历史二进制的 Windows 工具 artifact，正式 `.deb` 由同一提交的 `VirtualCamPro-rootless` artifact 单独提供。
