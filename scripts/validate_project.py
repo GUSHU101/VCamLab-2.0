@@ -547,6 +547,9 @@ def validate_workflows() -> None:
             "cancel-in-progress: true",
             "5280bd038207e14f8bd76f5417aa2fe641c03228",
             "0222fd5413cf4b9af096f37b4621afa2688572f7",
+            "a72a7a577e2fbe2838b6b5e9c72034fa7d114af96f0e1d4b016f18730ce4056e",
+            "sha256sum --check --strict",
+            "toolchain/linux/iphone/bin/clang",
         ),
         "CI workflows",
     )

@@ -17,6 +17,8 @@ permissions:
 env:
   THEOS_COMMIT: 5280bd038207e14f8bd76f5417aa2fe641c03228
   THEOS_SDKS_COMMIT: 0222fd5413cf4b9af096f37b4621afa2688572f7
+  THEOS_TOOLCHAIN_URL: https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-x86_64.tar.xz
+  THEOS_TOOLCHAIN_SHA256: a72a7a577e2fbe2838b6b5e9c72034fa7d114af96f0e1d4b016f18730ce4056e
 
 jobs:
   package:
@@ -48,8 +50,16 @@ jobs:
           git clone --filter=blob:none --no-checkout https://github.com/theos/sdks.git "$THEOS_PATH/sdks"
           git -C "$THEOS_PATH/sdks" fetch --depth=1 origin "$THEOS_SDKS_COMMIT"
           git -C "$THEOS_PATH/sdks" checkout --detach "$THEOS_SDKS_COMMIT"
+          toolchain_archive="$RUNNER_TEMP/iOSToolchain-x86_64.tar.xz"
+          curl --fail --location --retry 3 --output "$toolchain_archive" \
+            "$THEOS_TOOLCHAIN_URL"
+          printf '%s  %s\n' "$THEOS_TOOLCHAIN_SHA256" "$toolchain_archive" \
+            | sha256sum --check --strict
+          mkdir -p "$THEOS_PATH/toolchain"
+          tar -xJf "$toolchain_archive" -C "$THEOS_PATH/toolchain"
           test "$(git -C "$THEOS_PATH" rev-parse HEAD)" = "$THEOS_COMMIT"
           test "$(git -C "$THEOS_PATH/sdks" rev-parse HEAD)" = "$THEOS_SDKS_COMMIT"
+          test -x "$THEOS_PATH/toolchain/linux/iphone/bin/clang"
 
       - name: Validate and compile arm64 plus arm64e
         env:
