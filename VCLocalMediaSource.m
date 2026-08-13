@@ -1,7 +1,7 @@
 #import "VCLocalMediaSource.h"
 
 #import <AVFoundation/AVFoundation.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 

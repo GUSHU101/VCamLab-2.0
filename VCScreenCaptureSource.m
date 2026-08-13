@@ -1,7 +1,7 @@
 #import "VCScreenCaptureSource.h"
 
 #import <CoreGraphics/CoreGraphics.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <dlfcn.h>
 #import <mach/kern_return.h>
 #import <math.h>

@@ -1,7 +1,7 @@
 #import "VCSharedMediaBus.h"
 #import "VCSharedMediaProtocol.h"
 
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <mach/mach_time.h>
 #import <notify.h>
 #import <os/lock.h>

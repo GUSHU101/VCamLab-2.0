@@ -2,7 +2,7 @@
 
 #import <CoreImage/CoreImage.h>
 #import <ImageIO/ImageIO.h>
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <os/lock.h>
 
