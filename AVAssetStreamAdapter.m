@@ -10,6 +10,15 @@
 #import <math.h>
 #import <os/lock.h>
 
+#if TARGET_OS_IPHONE
+// These symbols are exported by iOS VideoToolbox, but Apple's public SDK
+// headers place their declarations inside a !TARGET_OS_IPHONE block.
+extern const CFStringRef
+    kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder;
+extern const CFStringRef
+    kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder;
+#endif
+
 static NSString * const VCStreamErrorDomain = @"com.murkaska.virtualcampro.stream";
 static void *VCPlayerItemStatusContext = &VCPlayerItemStatusContext;
 static const NSUInteger VCMaximumJPEGFrameBytes = 24 * 1024 * 1024;

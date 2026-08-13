@@ -37,7 +37,15 @@ jobs:
             build-essential clang lld make perl python3 xz-utils dpkg-dev \
             fakeroot file libtinfo6
 
+      - name: Restore pinned Theos environment
+        id: theos-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/theos
+          key: theos-${{ runner.os }}-${{ runner.arch }}-${{ env.THEOS_COMMIT }}-${{ env.THEOS_SDKS_COMMIT }}-${{ env.THEOS_TOOLCHAIN_SHA256 }}
+
       - name: Install pinned Theos and iOS SDK
+        if: steps.theos-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -57,6 +65,12 @@ jobs:
             | sha256sum --check --strict
           mkdir -p "$THEOS_PATH/toolchain"
           tar -xJf "$toolchain_archive" -C "$THEOS_PATH/toolchain"
+
+      - name: Verify pinned build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          THEOS_PATH="$RUNNER_TEMP/theos"
           test "$(git -C "$THEOS_PATH" rev-parse HEAD)" = "$THEOS_COMMIT"
           test "$(git -C "$THEOS_PATH/sdks" rev-parse HEAD)" = "$THEOS_SDKS_COMMIT"
           test -x "$THEOS_PATH/toolchain/linux/iphone/bin/clang"

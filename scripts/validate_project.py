@@ -550,6 +550,8 @@ def validate_workflows() -> None:
             "a72a7a577e2fbe2838b6b5e9c72034fa7d114af96f0e1d4b016f18730ce4056e",
             "sha256sum --check --strict",
             "toolchain/linux/iphone/bin/clang",
+            "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+            "steps.theos-cache.outputs.cache-hit != 'true'",
         ),
         "CI workflows",
     )

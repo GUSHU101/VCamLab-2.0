@@ -24,6 +24,7 @@ typedef void (*VCRenderDisplayFunction)(uint32_t contextID,
 
 @interface VCScreenCaptureSource () {
     os_unfair_lock _lock;
+    NSInteger _preferredFPS;
     CVPixelBufferPoolRef _pool;
     size_t _poolWidth;
     size_t _poolHeight;
