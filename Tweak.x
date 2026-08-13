@@ -176,14 +176,6 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (replacement) CFRelease(replacement);
 }
 
-- (void)captureOutput:(AVCaptureOutput *)output
-didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
-       fromConnection:(AVCaptureConnection *)connection {
-    id<AVCaptureAudioDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
-    if ([delegate respondsToSelector:_cmd]) {
-        [delegate captureOutput:output didDropSampleBuffer:sampleBuffer fromConnection:connection];
-    }
-}
 @end
 
 %hook AVCaptureAudioDataOutput

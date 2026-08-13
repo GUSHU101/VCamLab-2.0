@@ -39,7 +39,7 @@ jobs:
 
       - name: Restore pinned Theos environment
         id: theos-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/theos
           key: theos-${{ runner.os }}-${{ runner.arch }}-${{ env.THEOS_COMMIT }}-${{ env.THEOS_SDKS_COMMIT }}-${{ env.THEOS_TOOLCHAIN_SHA256 }}
@@ -74,6 +74,13 @@ jobs:
           test "$(git -C "$THEOS_PATH" rev-parse HEAD)" = "$THEOS_COMMIT"
           test "$(git -C "$THEOS_PATH/sdks" rev-parse HEAD)" = "$THEOS_SDKS_COMMIT"
           test -x "$THEOS_PATH/toolchain/linux/iphone/bin/clang"
+
+      - name: Save pinned Theos environment
+        if: steps.theos-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/theos
+          key: theos-${{ runner.os }}-${{ runner.arch }}-${{ env.THEOS_COMMIT }}-${{ env.THEOS_SDKS_COMMIT }}-${{ env.THEOS_TOOLCHAIN_SHA256 }}
 
       - name: Validate and compile arm64 plus arm64e
         env:
