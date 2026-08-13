@@ -320,7 +320,9 @@ static void VCInstallMediaServerHook(NSUInteger attempt) {
 
         int classCount = objc_getClassList(NULL, 0);
         if (classCount > 0) {
-            Class *classes = calloc((size_t)classCount, sizeof(Class));
+            Class __unsafe_unretained *classes =
+                (__unsafe_unretained Class *)calloc((size_t)classCount,
+                                                     sizeof(Class));
             int populated = classes ? objc_getClassList(classes, classCount) : 0;
             for (int index = 0; index < populated; index++) {
                 Class candidate = classes[index];
