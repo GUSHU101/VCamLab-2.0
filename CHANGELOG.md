@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.12.0 - 2026-08-14
+
+- Applied each local asset track's `preferredTransform` before the user's 0°/90°/180°/270° control, then combined both rotations and mirrors into one GPU render instead of silently treating encoded portrait pixels as upright.
+- Made horizontal mirroring operate in final displayed coordinates, validated swapped output dimensions for quarter-turn rotations, and published a SpringBoard first-frame transform status back to Settings.
+- Added a sanitizer-tested pure-C preferred-transform resolver covering all right-angle rotations, mirrored variants, scale/noise tolerance, degenerate matrices and rejection of arbitrary affine angles.
+- Added multi-selection for Files (up to 64 items per import) and Photos (up to 20 videos), ordered batch results, serialized stable-name reservation and partial-failure reporting so a usable volume-button playlist can be created in one operation.
+- Rebuilt the volume switch path around a freshly enumerated playlist, verified preference persistence, forced an immediate SpringBoard reader reload, retained the original system-volume behavior when fewer than two videos exist, and added a signature-checked `_changeVolumeByDelta:` fallback beside the direct button hooks.
+- Added Settings diagnostics for imported playlist size, installed volume-hook path, and the transform actually published by SpringBoard; project validation now requires these runtime checks and the orientation test workflow.
+
 ## 2.11.0 - 2026-08-14
 
 - Fixed every `PSLinkListCell` by explicitly routing it through `PSListItemsController`, so “替换来源”、本地解码质量和本地旋转 no longer open an empty settings page.

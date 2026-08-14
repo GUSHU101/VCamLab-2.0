@@ -17,6 +17,10 @@ static NSString * const VCLocalMediaImportErrorDomain = @"com.murkaska.virtualca
 static const unsigned long long VCLocalMediaReserveBytes = 64ULL * 1024ULL * 1024ULL;
 static const char *VCStreamStatusNotificationName =
     "com.murkaska.virtualcampro/stream.status";
+static const char *VCLocalTransformStatusNotificationName =
+    "com.murkaska.virtualcampro/local-transform.status";
+static const char *VCLocalVolumeHookStatusNotificationName =
+    "com.murkaska.virtualcampro/local-volume-hook.status";
 static const NSUInteger VCPStreamTestMaximumBytes = 8 * 1024 * 1024;
 
 typedef NS_ENUM(uint64_t, VCPStreamStatus) {
@@ -227,16 +231,22 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
 @property (nonatomic, strong) UIAlertController *localMediaImportAlert;
 - (void)finishStreamTestWithTitle:(NSString *)title message:(NSString *)message;
 - (void)showStreamTestResultWithTitle:(NSString *)title message:(NSString *)message;
-- (void)beginImportingLocalMediaURL:(NSURL *)url
-                     suggestedName:(NSString *)suggestedName
-       stopSecurityScopedAccessWhenDone:(BOOL)stopSecurityScopedAccess;
-- (void)finishLocalMediaImportWithURL:(NSURL *)url error:(NSError *)error;
+- (void)beginImportingLocalMediaURLs:(NSArray<NSURL *> *)urls
+                      suggestedNames:(NSArray<NSString *> *)suggestedNames
+                 securityAccessFlags:(NSArray<NSNumber *> *)securityAccessFlags;
+- (void)finishLocalMediaImportsWithURLs:(NSArray<NSURL *> *)urls
+                                  errors:(NSArray<NSError *> *)errors;
 - (void)showLocalMediaImportProgressWithMessage:(NSString *)message
                                       completion:(dispatch_block_t)completion;
 - (void)showLocalMediaResultWithTitle:(NSString *)title message:(NSString *)message;
 @end
 
 @implementation VCPRootListController
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (_specifiers) [self reloadSpecifiers];
+}
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
@@ -294,7 +304,7 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
                                         @"public.audiovisual-content"]
                                  inMode:UIDocumentPickerModeOpen];
         picker.delegate = strongSelf;
-        picker.allowsMultipleSelection = NO;
+        picker.allowsMultipleSelection = YES;
         if (@available(iOS 13.0, *)) picker.shouldShowFileExtensions = YES;
         [strongSelf presentViewController:picker animated:YES completion:nil];
     }]];
@@ -306,7 +316,10 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
             if (!strongSelf) return;
             PHPickerConfiguration *configuration = [[PHPickerConfiguration alloc] init];
             configuration.filter = PHPickerFilter.videosFilter;
-            configuration.selectionLimit = 1;
+            // A bounded batch makes the stable import directory immediately
+            // useful as a volume-button playlist without opening unbounded
+            // parallel iCloud downloads.
+            configuration.selectionLimit = 20;
             configuration.preferredAssetRepresentationMode =
                 PHPickerConfigurationAssetRepresentationModeCurrent;
             PHPickerViewController *picker =
@@ -339,6 +352,77 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
     return filename.length > 0 ? filename : @"尚未选择";
 }
 
+- (id)currentLocalVideoPlaylistSummary:(PSSpecifier *)specifier {
+    static NSSet<NSString *> *videoExtensions;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        videoExtensions = [NSSet setWithArray:@[
+            @"mp4", @"mov", @"m4v", @"3gp", @"3g2", @"avi",
+            @"mpg", @"mpeg", @"ts", @"mts", @"m2ts",
+        ]];
+    });
+    NSArray<NSURL *> *entries = [NSFileManager.defaultManager
+        contentsOfDirectoryAtURL:[NSURL fileURLWithPath:VCLocalMediaDirectory isDirectory:YES]
+       includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                          options:NSDirectoryEnumerationSkipsHiddenFiles
+                            error:nil];
+    NSUInteger count = 0;
+    for (NSURL *entry in entries) {
+        NSNumber *regular = nil;
+        [entry getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+        if (regular.boolValue &&
+            [videoExtensions containsObject:entry.pathExtension.lowercaseString]) {
+            count++;
+        }
+    }
+    return count >= 2
+        ? [NSString stringWithFormat:@"%lu 段，可用音量 +/− 切换", (unsigned long)count]
+        : [NSString stringWithFormat:@"%lu 段，至少需要 2 段", (unsigned long)count];
+}
+
+- (id)currentLocalTransformStatus:(PSSpecifier *)specifier {
+    int token = -1;
+    if (notify_register_check(VCLocalTransformStatusNotificationName, &token) !=
+        NOTIFY_STATUS_OK) {
+        return @"SpringBoard 状态不可用";
+    }
+    uint64_t state = 0;
+    uint32_t result = notify_get_state(token, &state);
+    notify_cancel(token);
+    if (result != NOTIFY_STATUS_OK || !(state & 1ULL)) {
+        return @"等待启用本地媒体";
+    }
+    BOOL ready = (state & (1ULL << 1)) != 0;
+    BOOL userMirror = (state & (1ULL << 2)) != 0;
+    BOOL aspectFill = (state & (1ULL << 3)) != 0;
+    BOOL trackMirror = (state & (1ULL << 4)) != 0;
+    NSInteger userRotation = (NSInteger)((state >> 8) & 0x3) * 90;
+    NSInteger trackRotation = (NSInteger)((state >> 10) & 0x3) * 90;
+    NSInteger finalRotation = (trackRotation + userRotation) % 360;
+    BOOL finalMirror = trackMirror != userMirror;
+    return [NSString stringWithFormat:@"%@：%ld° · %@ · %@",
+        ready ? @"已应用" : @"等待首帧",
+        (long)finalRotation,
+        finalMirror ? @"镜像" : @"不镜像",
+        aspectFill ? @"填满" : @"完整显示"];
+}
+
+- (id)currentLocalVolumeHookStatus:(PSSpecifier *)specifier {
+    int token = -1;
+    if (notify_register_check(VCLocalVolumeHookStatusNotificationName, &token) !=
+        NOTIFY_STATUS_OK) {
+        return @"SpringBoard 状态不可用";
+    }
+    uint64_t state = 0;
+    uint32_t result = notify_get_state(token, &state);
+    notify_cancel(token);
+    if (result != NOTIFY_STATUS_OK || !(state & 1ULL)) return @"未安装，保留系统音量";
+    BOOL buttons = (state & (1ULL << 1)) != 0;
+    BOOL delta = (state & (1ULL << 2)) != 0;
+    if (buttons && delta) return @"已安装：按键 + 增量双路径";
+    return buttons ? @"已安装：音量按键路径" : @"已安装：音量增量路径";
+}
+
 - (void)clearLocalMedia:(PSSpecifier *)specifier {
     if (self.localMediaImportInProgress) {
         [self showLocalMediaResultWithTitle:@"正在导入"
@@ -363,19 +447,33 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller
    didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
-    NSURL *url = urls.firstObject;
-    if (!url) return;
-    BOOL securityAccess = [url startAccessingSecurityScopedResource];
+    NSArray<NSURL *> *selectedURLs = urls.count > 64
+        ? [urls subarrayWithRange:NSMakeRange(0, 64)] : urls;
+    if (selectedURLs.count == 0) return;
+    NSMutableArray<NSNumber *> *securityFlags =
+        [NSMutableArray arrayWithCapacity:selectedURLs.count];
+    NSMutableArray<NSString *> *suggestedNames =
+        [NSMutableArray arrayWithCapacity:selectedURLs.count];
+    for (NSURL *url in selectedURLs) {
+        [securityFlags addObject:@([url startAccessingSecurityScopedResource])];
+        [suggestedNames addObject:url.lastPathComponent ?: @"media.mov"];
+    }
     __weak VCPRootListController *weakSelf = self;
     [controller dismissViewControllerAnimated:YES completion:^{
         VCPRootListController *strongSelf = weakSelf;
         if (!strongSelf) {
-            if (securityAccess) [url stopAccessingSecurityScopedResource];
+            [selectedURLs enumerateObjectsUsingBlock:^(NSURL *url,
+                                                       NSUInteger index,
+                                                       BOOL *stop) {
+                if ([securityFlags[index] boolValue]) {
+                    [url stopAccessingSecurityScopedResource];
+                }
+            }];
             return;
         }
-        [strongSelf beginImportingLocalMediaURL:url
-                                 suggestedName:url.lastPathComponent
-               stopSecurityScopedAccessWhenDone:securityAccess];
+        [strongSelf beginImportingLocalMediaURLs:selectedURLs
+                                  suggestedNames:suggestedNames
+                             securityAccessFlags:securityFlags];
     }];
 }
 
@@ -390,13 +488,15 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
 
 - (void)picker:(PHPickerViewController *)picker
 didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
-    PHPickerResult *result = results.firstObject;
-    NSItemProvider *provider = result.itemProvider;
     __weak VCPRootListController *weakSelf = self;
     [picker dismissViewControllerAnimated:YES completion:^{
         VCPRootListController *strongSelf = weakSelf;
-        if (!strongSelf || !provider) return;
-        if (![provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
+        if (!strongSelf || results.count == 0) return;
+        BOOL containsVideo = [results indexOfObjectPassingTest:^BOOL(
+            PHPickerResult *result, NSUInteger index, BOOL *stop) {
+            return [result.itemProvider hasItemConformingToTypeIdentifier:@"public.movie"];
+        }] != NSNotFound;
+        if (!containsVideo) {
             [strongSelf showLocalMediaResultWithTitle:@"无法读取视频"
                                                message:@"照片选择结果不包含可导入的视频文件。"];
             return;
@@ -404,32 +504,83 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
         strongSelf.localMediaImportInProgress = YES;
         [strongSelf showLocalMediaImportProgressWithMessage:@"正在从“照片”读取、复制并验证视频…"
                                                  completion:^{
-            [provider loadFileRepresentationForTypeIdentifier:@"public.movie"
-                                             completionHandler:^(NSURL *url, NSError *providerError) {
-                if (!url || providerError) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [weakSelf finishLocalMediaImportWithURL:nil error:providerError ?:
-                            VCLocalMediaError(VCLocalMediaImportErrorReadSource,
-                                              @"照片没有返回可读取的视频文件。", nil)];
-                    });
+            NSMutableArray *orderedURLs = [NSMutableArray arrayWithCapacity:results.count];
+            NSMutableArray *orderedErrors = [NSMutableArray arrayWithCapacity:results.count];
+            for (NSUInteger index = 0; index < results.count; index++) {
+                [orderedURLs addObject:NSNull.null];
+                [orderedErrors addObject:NSNull.null];
+            }
+            dispatch_group_t group = dispatch_group_create();
+            [results enumerateObjectsUsingBlock:^(PHPickerResult *result,
+                                                   NSUInteger index,
+                                                   BOOL *stop) {
+                NSItemProvider *provider = result.itemProvider;
+                if (![provider hasItemConformingToTypeIdentifier:@"public.movie"]) {
+                    @synchronized (orderedURLs) {
+                        orderedErrors[index] = VCLocalMediaError(
+                            VCLocalMediaImportErrorReadSource,
+                            @"一个照片项目不包含视频文件。", nil);
+                    }
                     return;
                 }
-                NSError *importError = nil;
-                NSURL *importedURL = VCImportLocalMediaURL(url, provider.suggestedName,
-                                                           NO, &importError);
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [weakSelf finishLocalMediaImportWithURL:importedURL error:importError];
-                });
+                dispatch_group_enter(group);
+                [provider loadFileRepresentationForTypeIdentifier:@"public.movie"
+                    completionHandler:^(NSURL *url, NSError *providerError) {
+                    NSError *importError = providerError;
+                    NSURL *importedURL = nil;
+                    if (url && !providerError) {
+                        // Providers may callback concurrently and temporary URLs
+                        // are only valid inside this block. Serialize final-name
+                        // reservation/copy while keeping each URL alive.
+                        @synchronized ([VCPRootListController class]) {
+                            importedURL = VCImportLocalMediaURL(url,
+                                                               provider.suggestedName,
+                                                               NO,
+                                                               &importError);
+                        }
+                    }
+                    if (!url && !importError) {
+                        importError = VCLocalMediaError(VCLocalMediaImportErrorReadSource,
+                            @"照片没有返回可读取的视频文件。", nil);
+                    }
+                    @synchronized (orderedURLs) {
+                        if (importedURL) orderedURLs[index] = importedURL;
+                        if (importError) orderedErrors[index] = importError;
+                    }
+                    dispatch_group_leave(group);
+                }];
             }];
+            dispatch_group_notify(group,
+                                  dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                NSMutableArray<NSURL *> *imported = [NSMutableArray array];
+                NSMutableArray<NSError *> *errors = [NSMutableArray array];
+                @synchronized (orderedURLs) {
+                    for (NSUInteger index = 0; index < orderedURLs.count; index++) {
+                        if ([orderedURLs[index] isKindOfClass:NSURL.class]) {
+                            [imported addObject:orderedURLs[index]];
+                        }
+                        if ([orderedErrors[index] isKindOfClass:NSError.class]) {
+                            [errors addObject:orderedErrors[index]];
+                        }
+                    }
+                }
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [weakSelf finishLocalMediaImportsWithURLs:imported errors:errors];
+                });
+            });
         }];
     }];
 }
 
-- (void)beginImportingLocalMediaURL:(NSURL *)url
-                     suggestedName:(NSString *)suggestedName
-       stopSecurityScopedAccessWhenDone:(BOOL)stopSecurityScopedAccess {
-    if (!url || self.localMediaImportInProgress) {
-        if (stopSecurityScopedAccess) [url stopAccessingSecurityScopedResource];
+- (void)beginImportingLocalMediaURLs:(NSArray<NSURL *> *)urls
+                      suggestedNames:(NSArray<NSString *> *)suggestedNames
+                 securityAccessFlags:(NSArray<NSNumber *> *)securityAccessFlags {
+    if (urls.count == 0 || self.localMediaImportInProgress) {
+        [urls enumerateObjectsUsingBlock:^(NSURL *url, NSUInteger index, BOOL *stop) {
+            if (index < securityAccessFlags.count && securityAccessFlags[index].boolValue) {
+                [url stopAccessingSecurityScopedResource];
+            }
+        }];
         return;
     }
     self.localMediaImportInProgress = YES;
@@ -437,11 +588,23 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
     [self showLocalMediaImportProgressWithMessage:@"正在复制并验证媒体，请稍候…"
                                        completion:^{
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            NSError *importError = nil;
-            NSURL *importedURL = VCImportLocalMediaURL(url, suggestedName,
-                                                       stopSecurityScopedAccess, &importError);
+            NSMutableArray<NSURL *> *importedURLs = [NSMutableArray array];
+            NSMutableArray<NSError *> *importErrors = [NSMutableArray array];
+            [urls enumerateObjectsUsingBlock:^(NSURL *url, NSUInteger index, BOOL *stop) {
+                NSError *importError = nil;
+                NSString *suggestedName = index < suggestedNames.count
+                    ? suggestedNames[index] : url.lastPathComponent;
+                BOOL stopSecurityAccess = index < securityAccessFlags.count
+                    ? securityAccessFlags[index].boolValue : NO;
+                NSURL *importedURL = VCImportLocalMediaURL(url,
+                                                           suggestedName,
+                                                           stopSecurityAccess,
+                                                           &importError);
+                if (importedURL) [importedURLs addObject:importedURL];
+                if (importError) [importErrors addObject:importError];
+            }];
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf finishLocalMediaImportWithURL:importedURL error:importError];
+                [weakSelf finishLocalMediaImportsWithURLs:importedURLs errors:importErrors];
             });
         });
     }];
@@ -471,11 +634,12 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
     [self presentViewController:alert animated:YES completion:completion];
 }
 
-- (void)finishLocalMediaImportWithURL:(NSURL *)url error:(NSError *)error {
+- (void)finishLocalMediaImportsWithURLs:(NSArray<NSURL *> *)urls
+                                  errors:(NSArray<NSError *> *)errors {
     if (![NSThread isMainThread]) {
         __weak VCPRootListController *weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [weakSelf finishLocalMediaImportWithURL:url error:error];
+            [weakSelf finishLocalMediaImportsWithURLs:urls errors:errors];
         });
         return;
     }
@@ -483,6 +647,8 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
     self.localMediaImportAlert = nil;
     self.localMediaImportInProgress = NO;
 
+    NSURL *url = urls.firstObject;
+    NSError *error = errors.firstObject;
     NSString *title = @"导入失败";
     NSString *message = error.localizedDescription ?: @"无法导入所选媒体。";
     if (url) {
@@ -495,9 +661,19 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
                                                  NULL, NULL, YES);
             _specifiers = nil;
             [self reloadSpecifiers];
-            title = @"本地媒体已就绪";
-            message = [NSString stringWithFormat:@"已选择：%@\n\n稳定路径：%@",
-                       url.lastPathComponent, url.path];
+            title = urls.count > 1 ? @"本地视频播放列表已就绪" : @"本地媒体已就绪";
+            message = urls.count > 1
+                ? [NSString stringWithFormat:
+                    @"已成功导入 %lu 个媒体文件，当前从 %@ 开始。音量加/减可切换稳定目录中的下一段/上一段视频。%@",
+                    (unsigned long)urls.count,
+                    url.lastPathComponent,
+                    errors.count > 0
+                        ? [NSString stringWithFormat:@"\n\n另有 %lu 个文件导入失败。",
+                            (unsigned long)errors.count] : @""]
+                : [NSString stringWithFormat:@"已选择：%@\n\n稳定路径：%@%@",
+                    url.lastPathComponent,
+                    url.path,
+                    errors.count > 0 ? @"\n\n其余选择项导入失败。" : @""];
         } else {
             title = @"媒体已复制，但设置保存失败";
             message = [NSString stringWithFormat:@"文件保存在 %@，请重新选择一次。", url.path];

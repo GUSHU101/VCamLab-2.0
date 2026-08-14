@@ -1,4 +1,5 @@
 #import "VCLocalMediaSource.h"
+#import "VCLocalOrientationMath.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <IOSurface/IOSurfaceRef.h>
@@ -11,6 +12,8 @@ static NSString * const VCLocalMediaErrorDomain =
 @interface VCLocalMediaSource ()
 @property (nonatomic, strong, readwrite) NSURL *fileURL;
 @property (atomic, assign, readwrite, getter=isRunning) BOOL running;
+@property (atomic, assign, readwrite) NSInteger trackRotation;
+@property (atomic, assign, readwrite, getter=isTrackMirrored) BOOL trackMirrored;
 @property (atomic, assign) NSUInteger lifecycleGeneration;
 @property (atomic, strong) AVAssetReader *reader;
 @property (nonatomic, strong) dispatch_queue_t readerQueue;
@@ -26,6 +29,8 @@ static NSString * const VCLocalMediaErrorDomain =
         _loops = YES;
         _preferredFPS = 60;
         _maximumPixelDimension = 1920;
+        _trackRotation = 0;
+        _trackMirrored = NO;
         _readerQueue = dispatch_queue_create(
             "com.murkaska.virtualcampro.local-media-reader",
             DISPATCH_QUEUE_SERIAL);
@@ -110,6 +115,18 @@ static NSString * const VCLocalMediaErrorDomain =
     AVAssetReaderTrackOutput *audioOutput = nil;
     if (videoTracks.firstObject) {
         AVAssetTrack *videoTrack = videoTracks.firstObject;
+        CGAffineTransform preferredTransform = videoTrack.preferredTransform;
+        VCLocalTrackOrientation orientation = VCResolveLocalTrackOrientation(
+            preferredTransform.a,
+            preferredTransform.b,
+            preferredTransform.c,
+            preferredTransform.d);
+        NSInteger trackRotation = orientation.valid ? orientation.rotation : 0;
+        BOOL trackMirrored = orientation.valid ? orientation.mirrored : NO;
+        self.trackRotation = trackRotation;
+        self.trackMirrored = trackMirrored;
+        NSLog(@"[VirtualCamPro] Local track display transform: rotation=%ld mirror=%@",
+              (long)trackRotation, trackMirrored ? @"YES" : @"NO");
         CGSize naturalSize = videoTrack.naturalSize;
         // AVAssetReaderTrackOutput emits encoded pixel orientation; it does not
         // apply preferredTransform. Scale that actual raster here and leave all

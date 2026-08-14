@@ -19,6 +19,10 @@ typedef void (^VCLocalMediaErrorCallback)(NSError *error);
 /// Device-side rate and decode-size controls apply only to local files.
 @property (atomic, assign) NSInteger preferredFPS;
 @property (atomic, assign) NSInteger maximumPixelDimension;
+/// Rotation/mirroring encoded by the asset track's preferredTransform. The
+/// coordinator combines this with the user's local-file controls in one pass.
+@property (atomic, assign, readonly) NSInteger trackRotation;
+@property (atomic, assign, readonly, getter=isTrackMirrored) BOOL trackMirrored;
 @property (atomic, copy, nullable) VCLocalVideoCallback videoCallback;
 @property (atomic, copy, nullable) VCLocalAudioCallback audioCallback;
 @property (atomic, copy, nullable) VCLocalMediaErrorCallback errorCallback;

@@ -208,24 +208,16 @@ CVPixelBufferRef VCCopyPixelBufferApplyingOrientation(CVPixelBufferRef source,
     CGImagePropertyOrientation orientation = kCGImagePropertyOrientationUp;
     switch (rotation) {
         case 90:
-            orientation = mirrorHorizontally
-                ? kCGImagePropertyOrientationRightMirrored
-                : kCGImagePropertyOrientationRight;
+            orientation = kCGImagePropertyOrientationRight;
             break;
         case 180:
-            orientation = mirrorHorizontally
-                ? kCGImagePropertyOrientationDownMirrored
-                : kCGImagePropertyOrientationDown;
+            orientation = kCGImagePropertyOrientationDown;
             break;
         case 270:
-            orientation = mirrorHorizontally
-                ? kCGImagePropertyOrientationLeftMirrored
-                : kCGImagePropertyOrientationLeft;
+            orientation = kCGImagePropertyOrientationLeft;
             break;
         default:
-            orientation = mirrorHorizontally
-                ? kCGImagePropertyOrientationUpMirrored
-                : kCGImagePropertyOrientationUp;
+            orientation = kCGImagePropertyOrientationUp;
             break;
     }
 
@@ -242,6 +234,19 @@ CVPixelBufferRef VCCopyPixelBufferApplyingOrientation(CVPixelBufferRef source,
         orientedImage = [orientedImage imageByApplyingTransform:
             CGAffineTransformMakeTranslation(-extent.origin.x, -extent.origin.y)];
         extent.origin = CGPointZero;
+    }
+    if (mirrorHorizontally) {
+        // Mirror after rotation so the switch always means horizontal mirror
+        // in the final displayed coordinate system, independent of rotation.
+        orientedImage = [orientedImage imageByApplyingTransform:
+            CGAffineTransformMake(-1.0, 0.0, 0.0, 1.0, extent.size.width, 0.0)];
+        extent = CGRectIntegral(orientedImage.extent);
+        if (CGRectIsEmpty(extent)) return NULL;
+        if (extent.origin.x != 0.0 || extent.origin.y != 0.0) {
+            orientedImage = [orientedImage imageByApplyingTransform:
+                CGAffineTransformMakeTranslation(-extent.origin.x, -extent.origin.y)];
+            extent.origin = CGPointZero;
+        }
     }
 
     size_t width = (size_t)extent.size.width;

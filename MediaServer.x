@@ -2,10 +2,13 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <mach-o/dyld.h>
+#import <notify.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <stdatomic.h>
 #import <substrate.h>
+#import <float.h>
+#import <math.h>
 
 #import "VCAudioSampleConverter.h"
 #import "VCFrameConverter.h"
@@ -14,6 +17,7 @@
 
 typedef void (*VCEmitSampleBufferFunction)(id, SEL, CMSampleBufferRef);
 typedef void (*VCVolumeButtonFunction)(id, SEL);
+typedef void (*VCVolumeDeltaFunction)(id, SEL, CGFloat);
 typedef struct {
     Class nodeClass;
     VCEmitSampleBufferFunction original;
@@ -37,15 +41,46 @@ static VCVolumeButtonFunction VCOriginalIncreaseVolume = NULL;
 static VCVolumeButtonFunction VCOriginalDecreaseVolume = NULL;
 static BOOL VCIncreaseVolumeHookInstalled = NO;
 static BOOL VCDecreaseVolumeHookInstalled = NO;
+static VCVolumeDeltaFunction VCOriginalChangeVolumeByDelta = NULL;
+static BOOL VCChangeVolumeByDeltaHookInstalled = NO;
+static const char *VCLocalVolumeHookStatusNotificationName =
+    "com.murkaska.virtualcampro/local-volume-hook.status";
 
 static void VCInstallMediaServerHook(NSUInteger attempt);
 static void VCInstallSpringBoardVolumeHooks(NSUInteger attempt);
+
+static void VCPublishVolumeHookStatus(void) {
+    int token = -1;
+    if (notify_register_check(VCLocalVolumeHookStatusNotificationName, &token) !=
+        NOTIFY_STATUS_OK) return;
+    BOOL buttonPair = VCIncreaseVolumeHookInstalled && VCDecreaseVolumeHookInstalled;
+    uint64_t state = (buttonPair || VCChangeVolumeByDeltaHookInstalled) ? 1ULL : 0ULL;
+    if (buttonPair) state |= 1ULL << 1;
+    if (VCChangeVolumeByDeltaHookInstalled) state |= 1ULL << 2;
+    notify_set_state(token, state);
+    notify_post(VCLocalVolumeHookStatusNotificationName);
+    notify_cancel(token);
+}
 
 static BOOL VCMethodIsVoidWithNoExplicitArguments(Method method) {
     if (!method || method_getNumberOfArguments(method) != 2) return NO;
     char returnType[16] = {0};
     method_getReturnType(method, returnType, sizeof(returnType));
     return returnType[0] == 'v';
+}
+
+static BOOL VCMethodIsVoidWithCGFloatArgument(Method method) {
+    if (!method || method_getNumberOfArguments(method) != 3) return NO;
+    char returnType[16] = {0};
+    char argumentType[16] = {0};
+    method_getReturnType(method, returnType, sizeof(returnType));
+    method_getArgumentType(method, 2, argumentType, sizeof(argumentType));
+    const char *type = argumentType;
+    while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' ||
+           *type == 'O' || *type == 'R' || *type == 'V') type++;
+    // All supported devices are arm64/arm64e, where CGFloat is encoded as a
+    // double. Refuse an unexpected ABI instead of corrupting SpringBoard state.
+    return returnType[0] == 'v' && type[0] == 'd';
 }
 
 static void VCSpringBoardIncreaseVolume(id object, SEL selector) {
@@ -60,7 +95,17 @@ static void VCSpringBoardDecreaseVolume(id object, SEL selector) {
     if (VCOriginalDecreaseVolume) VCOriginalDecreaseVolume(object, selector);
 }
 
+static void VCSpringBoardChangeVolumeByDelta(id object, SEL selector, CGFloat delta) {
+    if (isfinite(delta) && fabs(delta) > DBL_EPSILON &&
+        [[VCStreamCoordinator sharedCoordinator]
+            handleLocalMediaVolumeButtonDirection:delta > 0.0 ? 1 : -1]) return;
+    if (VCOriginalChangeVolumeByDelta) {
+        VCOriginalChangeVolumeByDelta(object, selector, delta);
+    }
+}
+
 static void VCInstallSpringBoardVolumeHooks(NSUInteger attempt) {
+    if (attempt == 0) VCPublishVolumeHookStatus();
     Class volumeControlClass = objc_getClass("SBVolumeControl");
     if (volumeControlClass) {
         SEL increaseSelector = sel_registerName("increaseVolume");
@@ -83,12 +128,39 @@ static void VCInstallSpringBoardVolumeHooks(NSUInteger attempt) {
                             (IMP *)&VCOriginalDecreaseVolume);
             VCDecreaseVolumeHookInstalled = VCOriginalDecreaseVolume != NULL;
         }
-        if (VCIncreaseVolumeHookInstalled && VCDecreaseVolumeHookInstalled) {
-            NSLog(@"[VirtualCamPro] SpringBoard local-playlist volume controls installed");
+        if (!VCChangeVolumeByDeltaHookInstalled) {
+            const char *deltaSelectorNames[] = {
+                "_changeVolumeByDelta:",
+                "changeVolumeByDelta:",
+            };
+            for (NSUInteger index = 0;
+                 index < sizeof(deltaSelectorNames) / sizeof(deltaSelectorNames[0]);
+                 index++) {
+                SEL deltaSelector = sel_registerName(deltaSelectorNames[index]);
+                Method deltaMethod = class_getInstanceMethod(volumeControlClass, deltaSelector);
+                if (!VCMethodIsVoidWithCGFloatArgument(deltaMethod)) continue;
+                MSHookMessageEx(volumeControlClass,
+                                deltaSelector,
+                                (IMP)VCSpringBoardChangeVolumeByDelta,
+                                (IMP *)&VCOriginalChangeVolumeByDelta);
+                VCChangeVolumeByDeltaHookInstalled =
+                    VCOriginalChangeVolumeByDelta != NULL;
+                if (VCChangeVolumeByDeltaHookInstalled) break;
+            }
+        }
+        if ((VCIncreaseVolumeHookInstalled && VCDecreaseVolumeHookInstalled) ||
+            VCChangeVolumeByDeltaHookInstalled) {
+            VCPublishVolumeHookStatus();
+            NSLog(@"[VirtualCamPro] SpringBoard local-playlist volume controls installed "
+                   "(buttons=%@, delta=%@)",
+                  (VCIncreaseVolumeHookInstalled && VCDecreaseVolumeHookInstalled)
+                      ? @"YES" : @"NO",
+                  VCChangeVolumeByDeltaHookInstalled ? @"YES" : @"NO");
             return;
         }
     }
     if (attempt >= 20) {
+        VCPublishVolumeHookStatus();
         NSLog(@"[VirtualCamPro] SBVolumeControl selectors unavailable; volume keeps its original behavior");
         return;
     }

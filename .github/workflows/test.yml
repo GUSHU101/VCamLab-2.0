@@ -45,6 +45,13 @@ jobs:
             tests/test_shared_media_protocol.c -lm -o /tmp/test_shared_media_protocol
           ASAN_OPTIONS=detect_leaks=1 /tmp/test_shared_media_protocol
 
+      - name: Test local orientation math with sanitizers
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -pedantic \
+            -fno-omit-frame-pointer -fsanitize=address,undefined \
+            tests/test_local_orientation_math.c -lm -o /tmp/test_local_orientation_math
+          ASAN_OPTIONS=detect_leaks=1 /tmp/test_local_orientation_math
+
   windows-control-center:
     runs-on: windows-2022
     timeout-minutes: 25

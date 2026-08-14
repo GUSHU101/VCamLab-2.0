@@ -12,6 +12,8 @@
 
 static const char *VCStreamStatusNotificationName =
     "com.murkaska.virtualcampro/stream.status";
+static const char *VCLocalTransformStatusNotificationName =
+    "com.murkaska.virtualcampro/local-transform.status";
 static const int VCInvalidNotifyToken = -1;
 
 typedef NS_ENUM(uint64_t, VCStreamStatus) {
@@ -40,11 +42,15 @@ typedef NS_ENUM(uint64_t, VCStreamStatus) {
     NSUInteger _transformGeneration;
     CVPixelBufferRef _pendingPixelBuffer;
     NSUInteger _pendingSourceGeneration;
+    NSInteger _pendingTrackRotation;
+    BOOL _pendingTrackMirror;
     BOOL _frameProcessingScheduled;
     CVPixelBufferRef _latestCompatibilityOutputPixelBuffer;
     CFAbsoluteTime _latestCompatibilityOutputTime;
     BOOL _compatibilityOutputPathActive;
     int _streamStatusToken;
+    int _localTransformStatusToken;
+    BOOL _localTransformStatusNeedsPublish;
     uint64_t _publishedStreamStatus;
     BOOL _loggedFirstFrame;
     BOOL _loggedStaleFrame;
@@ -139,6 +145,7 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         _sourceGeneration = 1;
         _transformGeneration = 1;
         _streamStatusToken = VCInvalidNotifyToken;
+        _localTransformStatusToken = VCInvalidNotifyToken;
         _publishedStreamStatus = UINT64_MAX;
         NSString *process = NSProcessInfo.processInfo.processName;
         NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
@@ -162,6 +169,10 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
                                   &self->_streamStatusToken) == NOTIFY_STATUS_OK) {
             [self publishStreamStatus:VCStreamStatusDisabled];
         }
+        if (self->_producerProcess) {
+            notify_register_check(VCLocalTransformStatusNotificationName,
+                                  &self->_localTransformStatusToken);
+        }
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         (__bridge const void *)self,
                                         VCPreferencesDidChange,
@@ -171,6 +182,28 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         [self startMemoryPressureMonitoring];
         [self refreshPreferencesAndStream];
     });
+}
+
+- (void)publishLocalTransformStatusReady:(BOOL)ready
+                            trackRotation:(NSInteger)trackRotation
+                              trackMirror:(BOOL)trackMirror {
+    if (!_producerProcess || _localTransformStatusToken < 0) return;
+    os_unfair_lock_lock(&_stateLock);
+    BOOL configured = _replacementEnabled &&
+                      _configuredSourceType == VCSourceTypeLocalMedia;
+    NSInteger userRotation = _configuredSourceRotation;
+    BOOL userMirror = _configuredMirrorSource;
+    BOOL aspectFill = _configuredAspectFill;
+    os_unfair_lock_unlock(&_stateLock);
+    uint64_t state = configured ? 1ULL : 0ULL;
+    if (configured && ready) state |= 1ULL << 1;
+    if (userMirror) state |= 1ULL << 2;
+    if (aspectFill) state |= 1ULL << 3;
+    if (trackMirror) state |= 1ULL << 4;
+    state |= ((uint64_t)((userRotation / 90) & 0x3)) << 8;
+    state |= ((uint64_t)((trackRotation / 90) & 0x3)) << 10;
+    notify_set_state(_localTransformStatusToken, state);
+    notify_post(VCLocalTransformStatusNotificationName);
 }
 
 - (void)publishStreamStatus:(VCStreamStatus)status {
@@ -302,8 +335,12 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         _configuredMirrorSource = effectiveMirror;
         _configuredHoldLastFrame = holdLastFrame;
         _configuredStaleFrameTimeout = staleTimeout;
+        _localTransformStatusNeedsPublish = enabled && localMediaControlsActive;
     }
     os_unfair_lock_unlock(&_stateLock);
+    if (_producerProcess) {
+        [self publishLocalTransformStatusReady:NO trackRotation:0 trackMirror:NO];
+    }
     if (!_producerProcess) return;
 
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -331,6 +368,8 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         NSUInteger sourceGeneration = ++self->_sourceGeneration;
         self->_loggedFirstFrame = NO;
         self->_loggedStaleFrame = NO;
+        self->_localTransformStatusNeedsPublish =
+            sourceType == VCSourceTypeLocalMedia;
         os_unfair_lock_unlock(&self->_stateLock);
         [self publishStreamStatus:VCStreamStatusConnecting];
 
@@ -340,7 +379,9 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
             __weak VCStreamCoordinator *weakSelf = self;
             source.frameCallback = ^(CVPixelBufferRef pixelBuffer) {
                 [weakSelf enqueueLatestPixelBuffer:pixelBuffer
-                                  sourceGeneration:sourceGeneration];
+                                  sourceGeneration:sourceGeneration
+                                      trackRotation:0
+                                         trackMirror:NO];
             };
             source.errorCallback = ^(NSError *error) {
                 [weakSelf producerFailedWithError:error];
@@ -356,9 +397,13 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
             source.preferredFPS = effectiveFPS;
             source.maximumPixelDimension = effectiveMaximumPixelDimension;
             __weak VCStreamCoordinator *weakSelf = self;
+            __weak VCLocalMediaSource *weakSource = source;
             source.videoCallback = ^(CVPixelBufferRef pixelBuffer) {
+                VCLocalMediaSource *strongSource = weakSource;
                 [weakSelf enqueueLatestPixelBuffer:pixelBuffer
-                                  sourceGeneration:sourceGeneration];
+                                  sourceGeneration:sourceGeneration
+                                      trackRotation:strongSource.trackRotation
+                                         trackMirror:strongSource.isTrackMirrored];
             };
             source.audioCallback = ^(const float *samples, NSUInteger frameCount) {
                 VCStreamCoordinator *strongSelf = weakSelf;
@@ -378,7 +423,9 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
             __weak VCStreamCoordinator *weakSelf = self;
             source.pixelBufferCallback = ^(CVPixelBufferRef pixelBuffer) {
                 [weakSelf enqueueLatestPixelBuffer:pixelBuffer
-                                  sourceGeneration:sourceGeneration];
+                                  sourceGeneration:sourceGeneration
+                                      trackRotation:0
+                                         trackMirror:NO];
             };
             source.errorCallback = ^(NSError *error) {
                 [weakSelf producerFailedWithError:error];
@@ -405,7 +452,9 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
 }
 
 - (void)enqueueLatestPixelBuffer:(CVPixelBufferRef)pixelBuffer
-                sourceGeneration:(NSUInteger)sourceGeneration {
+                sourceGeneration:(NSUInteger)sourceGeneration
+                    trackRotation:(NSInteger)trackRotation
+                       trackMirror:(BOOL)trackMirror {
     if (!pixelBuffer) return;
     CVPixelBufferRef retained = CVPixelBufferRetain(pixelBuffer);
     CVPixelBufferRef retired = NULL;
@@ -419,6 +468,8 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     retired = _pendingPixelBuffer;
     _pendingPixelBuffer = retained;
     _pendingSourceGeneration = sourceGeneration;
+    _pendingTrackRotation = trackRotation;
+    _pendingTrackMirror = trackMirror;
     if (!_frameProcessingScheduled) {
         _frameProcessingScheduled = YES;
         schedule = YES;
@@ -437,6 +488,10 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         NSUInteger transformGeneration = 0;
         NSInteger rotation = 0;
         BOOL mirror = NO;
+        NSInteger userRotation = 0;
+        BOOL userMirror = NO;
+        NSInteger trackRotation = 0;
+        BOOL trackMirror = NO;
         os_unfair_lock_lock(&_stateLock);
         input = _pendingPixelBuffer;
         _pendingPixelBuffer = NULL;
@@ -447,13 +502,40 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         }
         sourceGeneration = _pendingSourceGeneration;
         transformGeneration = _transformGeneration;
-        rotation = _configuredSourceRotation;
-        mirror = _configuredMirrorSource;
+        trackRotation = _pendingTrackRotation;
+        trackMirror = _pendingTrackMirror;
+        userRotation = _configuredSourceRotation;
+        userMirror = _configuredMirrorSource;
+        rotation = ((trackRotation + userRotation) % 360 + 360) % 360;
+        mirror = trackMirror != userMirror;
         os_unfair_lock_unlock(&_stateLock);
 
         CVPixelBufferRef transformed = VCCopyPixelBufferApplyingOrientation(input,
                                                                              rotation,
                                                                              mirror);
+        BOOL transformRequired = rotation != 0 || mirror;
+        if (transformed && (rotation == 90 || rotation == 270)) {
+            size_t expectedWidth = CVPixelBufferGetHeight(input);
+            size_t expectedHeight = CVPixelBufferGetWidth(input);
+            if (CVPixelBufferGetWidth(transformed) != expectedWidth ||
+                CVPixelBufferGetHeight(transformed) != expectedHeight) {
+                NSLog(@"[VirtualCamPro] Rejecting invalid local orientation output: "
+                       "%zux%zu expected %zux%zu",
+                      CVPixelBufferGetWidth(transformed),
+                      CVPixelBufferGetHeight(transformed),
+                      expectedWidth,
+                      expectedHeight);
+                CVPixelBufferRelease(transformed);
+                transformed = NULL;
+            }
+        }
+        BOOL transformApplied = transformed != NULL || !transformRequired;
+        if (!transformed && (rotation != 0 || mirror)) {
+            static dispatch_once_t orientationFailureLogToken;
+            dispatch_once(&orientationFailureLogToken, ^{
+                NSLog(@"[VirtualCamPro] Local orientation render failed; preserving source frames");
+            });
+        }
         if (!transformed) transformed = CVPixelBufferRetain(input);
         CVPixelBufferRelease(input);
 
@@ -465,11 +547,30 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         os_unfair_lock_unlock(&_stateLock);
         if (current && [[VCSharedVideoServer sharedServer] publishPixelBuffer:transformed]) {
             [self publishStreamStatus:VCStreamStatusReceiving];
+            BOOL publishTransformStatus = NO;
+            os_unfair_lock_lock(&_stateLock);
+            if (_localTransformStatusNeedsPublish && _replacementEnabled &&
+                sourceGeneration == _sourceGeneration &&
+                transformGeneration == _transformGeneration) {
+                _localTransformStatusNeedsPublish = NO;
+                publishTransformStatus = YES;
+            }
+            os_unfair_lock_unlock(&_stateLock);
+            if (publishTransformStatus) {
+                [self publishLocalTransformStatusReady:transformApplied
+                                         trackRotation:trackRotation
+                                           trackMirror:trackMirror];
+            }
             if (firstFrame) {
-                NSLog(@"[VirtualCamPro] SpringBoard published first shared frame: %zux%zu/%u",
+                NSLog(@"[VirtualCamPro] SpringBoard published first shared frame: %zux%zu/%u "
+                       "(track rotation=%ld mirror=%@, user rotation=%ld mirror=%@)",
                       CVPixelBufferGetWidth(transformed),
                       CVPixelBufferGetHeight(transformed),
-                      (unsigned int)CVPixelBufferGetPixelFormatType(transformed));
+                      (unsigned int)CVPixelBufferGetPixelFormatType(transformed),
+                      (long)trackRotation,
+                      trackMirror ? @"YES" : @"NO",
+                      (long)userRotation,
+                      userMirror ? @"YES" : @"NO");
             }
         }
         CVPixelBufferRelease(transformed);
@@ -487,6 +588,14 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         BOOL debounced = _lastVolumeButtonActionTime > 0 &&
                          now - _lastVolumeButtonActionTime < 0.35;
         os_unfair_lock_unlock(&_stateLock);
+        NSURL *selectedURL = self.localSource.fileURL;
+        NSInteger selectedIndex = NSNotFound;
+        NSArray<NSURL *> *freshPlaylist = VCLocalVideoPlaylistForURL(selectedURL,
+                                                                     &selectedIndex);
+        if (freshPlaylist.count > 0) {
+            self.localMediaPlaylist = freshPlaylist;
+            self.localMediaPlaylistIndex = selectedIndex;
+        }
         NSInteger count = (NSInteger)self.localMediaPlaylist.count;
         if (!active || count == 0) return NO;
         // Consume key-repeat events while a local playlist owns the buttons, but
@@ -501,7 +610,6 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
             current = (current + (direction > 0 ? 1 : -1) + count) % count;
         }
         nextURL = self.localMediaPlaylist[(NSUInteger)current];
-        self.localMediaPlaylistIndex = current;
         os_unfair_lock_lock(&_stateLock);
         _lastVolumeButtonActionTime = now;
         os_unfair_lock_unlock(&_stateLock);
@@ -511,13 +619,22 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
         CFPreferencesSetAppValue((__bridge CFStringRef)VCLocalMediaPathKey,
                                  (__bridge CFStringRef)nextURL.path,
                                  (__bridge CFStringRef)VCPreferencesDomain);
-        CFPreferencesAppSynchronize((__bridge CFStringRef)VCPreferencesDomain);
+        BOOL saved = CFPreferencesAppSynchronize((__bridge CFStringRef)VCPreferencesDomain);
+        if (!saved) {
+            NSLog(@"[VirtualCamPro] Volume-button video switch could not persist %@",
+                  nextURL.lastPathComponent);
+            return;
+        }
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),
             (__bridge CFStringRef)VCPreferencesChangedNotification,
             NULL,
             NULL,
             YES);
+        // Do not depend on this process receiving its own Darwin notification.
+        // Reload directly so the old reader is invalidated on the next main-loop
+        // turn even if notification delivery is coalesced.
+        [self refreshPreferencesAndStream];
         NSLog(@"[VirtualCamPro] Volume button selected local video %@",
               nextURL.lastPathComponent);
     });
@@ -559,6 +676,8 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     pending = _pendingPixelBuffer;
     compatibility = _latestCompatibilityOutputPixelBuffer;
     _pendingPixelBuffer = NULL;
+    _pendingTrackRotation = 0;
+    _pendingTrackMirror = NO;
     _latestCompatibilityOutputPixelBuffer = NULL;
     _latestCompatibilityOutputTime = 0;
     _compatibilityOutputPathActive = NO;
@@ -697,5 +816,6 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     else [self clearPendingAndCompatibilityFrames];
     if (self.memoryPressureSource) dispatch_source_cancel(self.memoryPressureSource);
     if (_streamStatusToken >= 0) notify_cancel(_streamStatusToken);
+    if (_localTransformStatusToken >= 0) notify_cancel(_localTransformStatusToken);
 }
 @end

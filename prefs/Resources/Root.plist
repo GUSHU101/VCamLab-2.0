@@ -70,7 +70,7 @@
             <key>cell</key><string>PSGroupCell</string>
             <key>label</key><string>手机本地媒体</string>
             <key>vcSourceTypes</key><array><integer>2</integer></array>
-            <key>footerText</key><string>可直接从“文件”选择视频或音频，也可从“照片”选择视频。所选媒体会复制到 /var/mobile/Media/VirtualCamPro/，避免文件提供器临时 URL 在 SpringBoard 中失效。播放期间按音量加/减切换同目录下一段/上一段视频。</string>
+            <key>footerText</key><string>可从“文件”批量选择视频/音频，也可从“照片”一次选择多段视频。所选媒体会复制到 /var/mobile/Media/VirtualCamPro/；目录中至少有 2 段视频时，播放期间按音量加/减切换下一段/上一段。</string>
         </dict>
         <dict>
             <key>cell</key><string>PSButtonCell</string>
@@ -86,6 +86,24 @@
             <key>get</key><string>currentLocalMediaName:</string>
             <key>vcSourceTypes</key><array><integer>2</integer></array>
             <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>音量键播放列表</string>
+            <key>get</key><string>currentLocalVideoPlaylistSummary:</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>音量键 Hook 状态</string>
+            <key>get</key><string>currentLocalVolumeHookStatus:</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>SpringBoard 变换状态</string>
+            <key>get</key><string>currentLocalTransformStatus:</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
         </dict>
         <dict>
             <key>cell</key><string>PSButtonCell</string>

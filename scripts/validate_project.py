@@ -168,6 +168,12 @@ def validate_preferences() -> None:
             "AVMediaTypeVideo",
             "AVMediaTypeAudio",
             "CFPreferencesSetAppValue(VCLocalMediaPathKey",
+            "picker.allowsMultipleSelection = YES",
+            "configuration.selectionLimit = 20",
+            "finishLocalMediaImportsWithURLs",
+            "currentLocalVideoPlaylistSummary:",
+            "currentLocalTransformStatus:",
+            "currentLocalVolumeHookStatus:",
         ),
         "native local-media picker",
     )
@@ -220,6 +226,7 @@ def validate_zero_copy_bus() -> None:
     bus = read_text("VCSharedMediaBus.m")
     screen = read_text("VCScreenCaptureSource.m")
     local = read_text("VCLocalMediaSource.m")
+    orientation = read_text("VCLocalOrientationMath.h")
     network = read_text("AVAssetStreamAdapter.m")
     network_header = read_text("AVAssetStreamAdapter.h")
     coordinator = read_text("VCStreamCoordinator.m")
@@ -273,8 +280,22 @@ def validate_zero_copy_bus() -> None:
             "preferredFPS",
             "BOOL tooLate",
             "CMBlockBufferGetDataPointer",
+            "VCResolveLocalTrackOrientation",
+            "videoTrack.preferredTransform",
+            "trackRotation",
+            "trackMirrored",
         ),
         "local media producer",
+    )
+    require(
+        orientation,
+        (
+            "VCResolveLocalTrackOrientation",
+            "determinant",
+            "atan2",
+            "fabs(angle - (double)quadrant * halfPi) > 0.02",
+        ),
+        "local track orientation resolver",
     )
     require(
         coordinator,
@@ -325,6 +346,9 @@ def validate_zero_copy_bus() -> None:
             "effectiveMirror = localMediaControlsActive ? mirror : NO",
             "VCLocalVideoPlaylistForURL",
             "handleLocalMediaVolumeButtonDirection",
+            "trackRotation + userRotation",
+            "publishLocalTransformStatusReady",
+            "Do not depend on this process receiving its own Darwin notification",
         ),
         "source-specific media policy",
     )
@@ -369,6 +393,11 @@ def validate_hooks_and_fail_open() -> None:
             "SBVolumeControl",
             "handleLocalMediaVolumeButtonDirection:1",
             "handleLocalMediaVolumeButtonDirection:-1",
+            "VCMethodIsVoidWithCGFloatArgument",
+            '"_changeVolumeByDelta:"',
+            "VCChangeVolumeByDeltaHookInstalled",
+            "VCPublishVolumeHookStatus",
+            "local-volume-hook.status",
         ),
         "system hook fail-open path",
     )
@@ -556,6 +585,17 @@ def validate_jpeg_parser_tests() -> None:
         ),
         "shared media protocol tests",
     )
+    orientation_test = read_text("tests/test_local_orientation_math.c")
+    require(
+        orientation_test,
+        (
+            "expect_orientation(0, 1, -1, 0, 90, false)",
+            "expect_orientation(0, -1, -1, 0, 90, true)",
+            "arbitrary.valid",
+            "NAN",
+        ),
+        "local orientation tests",
+    )
 
 
 def validate_workflows() -> None:
@@ -575,6 +615,7 @@ def validate_workflows() -> None:
         (
             "tests/test_jpeg_parser.c",
             "tests/test_shared_media_protocol.c",
+            "tests/test_local_orientation_math.c",
             "make package FINALPACKAGE=1",
             "scripts/verify_deb.sh",
             "dpkg-deb -f",

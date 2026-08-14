@@ -5,7 +5,7 @@
 
 VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/麦克风插件。SpringBoard 进程只生成一份媒体流，`mediaserverd` 在 `CMCapture` 相机媒体图的 `BWNodeOutput` 处替换真实 `CMSampleBuffer`；照片、录像、视频通话、WebRTC 与扫码等下游因此读取同一份替换样本，而不是在界面上覆盖一层图片。
 
-当前版本：`2.11.0`
+当前版本：`2.12.0`
 
 > 正式 `.deb` 由 GitHub Actions 从当前提交构建并作为 `VirtualCamPro-rootless` artifact 发布；不要混用历史 2.8.0 二进制。
 
@@ -16,7 +16,7 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - 自动回退：系统 Hook 只有在实际成功输出替换样本后才发布短心跳。应用内 `AVCaptureVideoDataOutput`、`AVCaptureAudioDataOutput`、预览与照片 Hook 根据心跳自动旁路或接管，不再提供手动“兼容模式”。
 - 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface，通知中只传递 Surface ID 与代次；消费者映射同一块物理内存，不复制或序列化整帧。
 - 本地媒体：MP4/MOV 等视频可同时替换摄像头和麦克风；纯 MP3/M4A 只替换麦克风，画面继续使用物理摄像头。
-- 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”选择视频/音频或从“照片”选择视频；无需手工输入路径。导入会先检查空间和音视频轨道，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
+- 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”批量选择视频/音频，或从“照片”一次选择多段视频；无需手工输入路径。导入会逐个检查空间和音视频轨道，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
 - 屏幕镜像：SpringBoard 通过 CoreAnimation 直接渲染到 IOSurface，再交给系统相机管线。
 - HLS：URL 中包含 `.m3u8` 时使用 `AVPlayerItemVideoOutput` 解码。
 - MJPEG：其他 HTTP/HTTPS URL 按连续 JPEG 流解析；增量校验 JPEG 段结构、直接读取 SOF 尺寸并限制单帧与接收缓冲。优先尝试实时 VideoToolbox→IOSurface NV12 解码，不支持时自动回退 ImageIO。
@@ -31,8 +31,8 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - 可配置断流策略：保持最后一帧，或在设定超时后恢复真实相机。
 - rootless 打包，同时构建 `arm64` 和 `arm64e`。
 - 设置修改通过 Darwin 通知实时传递；安装/卸载二进制时才需要重启 SpringBoard 与 `mediaserverd`。
-- 本地视频控制：仅手机本地文件支持 0°/90°/180°/270° 旋转、水平镜像、最高 FPS 和 1280/1920/2560/3840 解码质量；网络流和屏幕来源忽略这些设置。
-- 音量键播放列表：本地媒体模式下，音量加/减切换所选文件同目录中按文件名排序的下一段/上一段视频；存在可切换项目时按键被播放列表消费，否则保持系统音量行为。
+- 本地视频控制：先读取文件自身的 `preferredTransform`，再叠加 0°/90°/180°/270° 用户旋转和最终画面水平镜像；最高 FPS 与 1280/1920/2560/3840 解码质量也只作用于本地文件。设置页会显示 SpringBoard 首帧实际应用状态。
+- 音量键播放列表：稳定目录中至少有两段视频时，音量加/减切换按文件名排序的下一段/上一段；每次按键重新扫描播放列表、持久化选择并直接重建 SpringBoard reader。设置页会显示视频数量和已安装的按键 Hook 路径；不足两段时保持系统音量行为。
 - OBS 工作流：Windows 工具默认自动读取当前 OBS Profile 已保存的基础画布、输出分辨率和 FPS，并与实际 DirectShow 发布模式交叉验证；启动时按当前参数实测编码余量，只有可真正创建并达到实时余量的 Intel Quick Sync MJPEG 会话才会自动接管。启用 OBS 自带的密码保护 WebSocket 后，还可在不关闭 OBS 的情况下自动启动/刷新 Virtual Camera。
 - 一键手机配置：在 `VirtualCamPro-Windows-Control-Center/` 中运行 `install-phone.bat --setup 手机IP`，安装后自动推导电脑到手机所用网卡并写入流 URL；同时保存的 FPS 只供以后选择手机本地视频时使用，不限制网络流。
 - Windows 可视化控制中心：仓库中的 `VirtualCamPro-Windows-Control-Center/` 是可直接使用的独立工具目录，双击其中的 `VirtualCamPro-Windows控制中心.bat` 即可预检、一键部署、验证安装并启动或诊断 OBS 桥接。
