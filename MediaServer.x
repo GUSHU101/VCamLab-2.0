@@ -366,7 +366,8 @@ static void VCScanKnownVolumeClasses(void) {
 static void VCScanLoadedVolumeClasses(void) {
     int classCount = objc_getClassList(NULL, 0);
     if (classCount <= 0) return;
-    Class *classes = calloc((size_t)classCount, sizeof(Class));
+    Class __unsafe_unretained *classes =
+        (__unsafe_unretained Class *)calloc((size_t)classCount, sizeof(Class));
     if (!classes) return;
     classCount = objc_getClassList(classes, classCount);
     for (int classIndex = 0; classIndex < classCount; classIndex++) {
