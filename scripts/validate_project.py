@@ -834,6 +834,9 @@ def validate_package_and_docs() -> None:
         fail("Windows companion and iOS package versions do not match")
     if manifest.get("packageIncluded") is not False:
         fail("source-tree standalone manifest must not advertise a stale bundled package")
+    standalone_builder = read_text("tools/build-windows-standalone.ps1")
+    if '.Replace("`r`n", "`n")' not in standalone_builder:
+        fail("generated standalone manifest needs canonical LF JSON formatting")
 
     package_verifier = read_text("scripts/verify_deb.sh")
     require(

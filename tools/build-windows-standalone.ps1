@@ -112,9 +112,10 @@ $manifest = [ordered]@{
     files = $manifestFiles
 }
 $manifestPath = Join-Path $outputRoot "standalone-manifest.json"
+$manifestJson = ($manifest | ConvertTo-Json -Depth 6).Replace("`r`n", "`n")
 [IO.File]::WriteAllText(
     $manifestPath,
-    ($manifest | ConvertTo-Json -Depth 6),
+    $manifestJson,
     (New-Object Text.UTF8Encoding($true))
 )
 
