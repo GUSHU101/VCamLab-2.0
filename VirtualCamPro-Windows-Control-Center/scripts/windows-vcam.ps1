@@ -1067,7 +1067,6 @@ function New-VcamFfmpegArguments {
         "-loglevel", $LogLevel,
         "-map", "0:v:0",
         "-an", "-sn", "-dn",
-        "-flags", "low_delay",
         "-vf", $filter
     )
 
@@ -1236,6 +1235,7 @@ FPSDen=1001
         $argumentText -notlike "*-vf`nsetsar=1*" -or
         $argumentText -like "*scale=1920:1080*" -or
         $argumentText -notlike "*-loglevel`nerror*" -or
+        $argumentText -like "*-flags`nlow_delay*" -or
         $argumentText -notlike "*-fps_mode`npassthrough*" -or
         $argumentText -notlike "*-huffman`ndefault*" -or
         $argumentText -notlike "*-threads`n4*" -or

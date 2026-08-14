@@ -1,4 +1,4 @@
-# VirtualCamPro Windows 控制中心 2.24.0 部署教程
+# VirtualCamPro Windows 控制中心 2.24.1 部署教程
 
 本目录是可直接使用的 Windows 独立控制中心，包含图形控制中心、OBS/FFmpeg 桥接工具、命令行工具和完整性清单。为避免混用历史二进制，源码仓库不附带 `.deb`；请从同一提交的 GitHub Actions `VirtualCamPro-rootless` artifact 下载正式 Rootless 安装包并放入本目录的 `packages/`。普通用户不需要复制仓库根目录中的 iOS 源码。
 
@@ -20,7 +20,7 @@
 standalone-self-test.bat
 ```
 
-2.24.0 的 `standalone-self-test.bat` 不再只做文件哈希检查：它还会实际启动 GUI 冒烟测试、核心脚本 SelfTest、本机 HLS HTTP 服务，并验证 GET / HEAD / HTTP Range 206 / OPTIONS+CORS；如果检测到 FFmpeg，还会同时检查 MJPEG 与 libx264 编码器，并实际生成一小段 H.264 HLS 测试流。看到最终 `[OK]` 后再继续。如果完整性或运行级检查失败，优先处理第一条 `[FAIL]`；除 `obs-vcam-config.cmd` 外，不要单独修改交付文件。
+2.24.1 的 `standalone-self-test.bat` 不再只做文件哈希检查：它还会实际启动 GUI 冒烟测试、核心脚本 SelfTest、本机 HLS HTTP 服务，并验证 GET / HEAD / HTTP Range 206 / OPTIONS+CORS；如果检测到 FFmpeg，还会同时检查 MJPEG 与 libx264 编码器，并实际生成一小段 H.264 HLS 测试流。看到最终 `[OK]` 后再继续。如果完整性或运行级检查失败，优先处理第一条 `[FAIL]`；除 `obs-vcam-config.cmd` 外，不要单独修改交付文件。
 
 ## 3. 准备 OBS 输出
 
@@ -90,7 +90,7 @@ MJPEG 模式使用多线程 JPEG、约 100–150 ms 的短输入缓冲、3–12 
 
 1. 打开“设置 → VirtualCamPro”。
 2. 确认“启用画面替换”开启，“应用层兼容模式”默认关闭。
-3. 确认流 URL 正确，点击“检测当前网络流”。2.24.0 iOS 包同时包含 MJPEG 接收器、VideoToolbox/ImageIO 自动解码路径和基于 AVPlayer 的 HLS `.m3u8` 接收路径。
+3. 确认流 URL 正确，点击“检测当前网络流”。2.24.1 iOS 包同时包含 MJPEG 接收器、VideoToolbox/ImageIO 自动解码路径和基于 AVPlayer 的 HLS `.m3u8` 接收路径。
 4. 彻底退出并重新打开相机或目标应用。
 5. 验证预览、录像、照片和目标应用输入来自同一 OBS 构图。
 6. 验证横竖屏、前后摄、Live Photo、连拍及常用第三方相机客户端。

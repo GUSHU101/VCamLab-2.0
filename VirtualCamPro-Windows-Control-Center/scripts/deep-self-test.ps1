@@ -366,7 +366,9 @@ function Test-FfmpegMjpegRuntime {
         $startInfo.RedirectStandardError = $true
         $startInfo.Arguments = (
             '-hide_banner -loglevel error -re -f lavfi -i "testsrc2=size=160x120:rate=10" ' +
-            '-map 0:v:0 -an -c:v mjpeg -threads 2 -pix_fmt yuvj420p -q:v 5 ' +
+            '-map 0:v:0 -an -sn -dn -vf setsar=1 ' +
+            '-c:v mjpeg -threads 4 -pix_fmt yuvj420p -q:v 1 -huffman optimal ' +
+            '-fps_mode passthrough -flush_packets 1 ' +
             '-f fifo -fifo_format mpjpeg -queue_size 20 -drop_pkts_on_overflow 1 ' +
             '-format_opts "listen=1:flush_packets=1:content_type=multipart/x-mixed-replace;boundary=ffmpeg" ' +
             ('http://127.0.0.1:{0}/live.mjpg' -f $port)
@@ -439,7 +441,7 @@ function Test-FfmpegMjpegRuntime {
     }
 }
 
-Write-DeepResult -Level "INFO" -Message "VirtualCamPro 2.24.0 deep self-test started."
+Write-DeepResult -Level "INFO" -Message "VirtualCamPro 2.24.1 deep self-test started."
 Write-DeepResult -Level "INFO" -Message "Root: $root"
 
 if ($PSVersionTable.PSVersion.Major -lt 5) {
@@ -672,7 +674,7 @@ if ([string]::IsNullOrWhiteSpace($ffmpegPath)) {
         if ($hasMjpeg) {
             try {
                 Test-FfmpegMjpegRuntime -FfmpegPath $ffmpegPath
-                Write-DeepResult -Level "PASS" -Message "FFmpeg MJPEG HTTP runtime test passed, including multipart Content-Type."
+                Write-DeepResult -Level "PASS" -Message "FFmpeg MJPEG HTTP runtime test passed with the production quality/thread/Huffman profile and multipart Content-Type."
             } catch {
                 Write-DeepResult -Level "WARN" -Message "FFmpeg MJPEG runtime smoke test failed: $($_.Exception.Message)"
             }

@@ -840,6 +840,12 @@ def validate_package_and_docs() -> None:
                 fail(f"broken local link in {path.name}: {target}")
 
     windows_config = read_text("VirtualCamPro-Windows-Control-Center/obs-vcam-config.cmd")
+    windows_streamer = read_text(
+        "VirtualCamPro-Windows-Control-Center/scripts/windows-vcam.ps1"
+    )
+    windows_deep_test = read_text(
+        "VirtualCamPro-Windows-Control-Center/scripts/deep-self-test.ps1"
+    )
     require(
         windows_config,
         (
@@ -854,6 +860,19 @@ def validate_package_and_docs() -> None:
         ),
         "Windows low-latency defaults",
     )
+    require(
+        windows_streamer + windows_deep_test,
+        (
+            '"-huffman", $MjpegHuffman',
+            '$argumentText -like "*-flags`nlow_delay*"',
+            '-c:v mjpeg -threads 4 -pix_fmt yuvj420p -q:v 1 -huffman optimal',
+            '-fps_mode passthrough -flush_packets 1',
+            'production quality/thread/Huffman profile',
+        ),
+        "FFmpeg 8 production MJPEG regression coverage",
+    )
+    if re.search(r'"-flags"\s*,\s*"low_delay"', windows_streamer):
+        fail("MJPEG bridge must not apply FFmpeg's MPEG-2-only low_delay forcing flag")
 
     manifest_path = ROOT / "VirtualCamPro-Windows-Control-Center/standalone-manifest.json"
     try:

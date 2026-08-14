@@ -1,16 +1,16 @@
 ﻿{
     "schemaVersion":  1,
     "toolName":  "VirtualCamPro Windows Control Center",
-    "toolVersion":  "2.24.0",
-    "generatedAtUtc":  "2026-08-14T19:25:47.5695019Z",
-    "sourceCommit":  "c3f49a90e032e798922ea792923b33075f6b6710",
+    "toolVersion":  "2.24.1",
+    "generatedAtUtc":  "2026-08-14T19:50:06.4157954Z",
+    "sourceCommit":  "271ef4957ebd66adfde0deb93d8ed741edb765d1",
     "sourceDirty":  true,
     "packageIncluded":  false,
     "files":  [
                   {
                       "path":  "DEPLOYMENT.md",
                       "bytes":  7921,
-                      "sha256":  "1E65C0EEFB84DFA1E59B975E54691B95BA7BC7B9DA73230059B32A8D56C2FCF9",
+                      "sha256":  "8C3844CDE5B8942D7DC9A0D9E53B15B08CE23D6826EED8B89AD1AADF261FD925",
                       "mutable":  false
                   },
                   {
@@ -27,8 +27,8 @@
                   },
                   {
                       "path":  "scripts\\deep-self-test.ps1",
-                      "bytes":  39219,
-                      "sha256":  "E35E87CEE11D6274C17201E6D7CC36AFF6AE97D3011550B2ABA80EF9C12BDAD7",
+                      "bytes":  39372,
+                      "sha256":  "D6F3A32F9E1E5C80F6FE652B97F65653037E69517650905D949D12F5CAC49FB7",
                       "mutable":  false
                   },
                   {
@@ -40,13 +40,13 @@
                   {
                       "path":  "scripts\\install-ios.ps1",
                       "bytes":  30353,
-                      "sha256":  "B6C48378FE70BF9C432DF7CB9EA1425091245369239B807CB17982F405CDE4F5",
+                      "sha256":  "B7D53874389025F3E13909B3C6F1B18EAB49222AA8D9CC6FCC900DDED8EA4A55",
                       "mutable":  false
                   },
                   {
                       "path":  "scripts\\install-ios-gui.ps1",
                       "bytes":  44052,
-                      "sha256":  "D25D7B4AB110048411C12815EA6C6EED873D24CA09567033E8F3FDCFCE1DD3A3",
+                      "sha256":  "628E2AEB2306F8F003C7A5DEE46268C03F8964AA155A4F9AF6CC7C947FEE8496",
                       "mutable":  false
                   },
                   {
@@ -69,8 +69,8 @@
                   },
                   {
                       "path":  "scripts\\windows-vcam.ps1",
-                      "bytes":  88730,
-                      "sha256":  "78FB28DEE273EC5C0EDD2D9188102E14A14C33FE19AFF86970352DDEF200F4DF",
+                      "bytes":  88748,
+                      "sha256":  "4C5B9D619BFDD1392ED7B70060352113243A56A5A420B87E151D26765B419664",
                       "mutable":  false
                   },
                   {
@@ -100,13 +100,13 @@
                   {
                       "path":  "WINDOWS_TOOLS.md",
                       "bytes":  14623,
-                      "sha256":  "A93C1FB977E58980F029491813978A9628170AC2FE4A22E9FAA93262D9C28F2A",
+                      "sha256":  "55F3C5E494AF5A5FCDC05ABFB508526DA0E46148A7C3A952A05849F208CA21C8",
                       "mutable":  false
                   },
                   {
                       "path":  "使用说明.txt",
                       "bytes":  4115,
-                      "sha256":  "9C598BDB714C5DBD74FAEC1AD2311A9BE214A9DCEE34A89CDA5A504ECD22ED7E",
+                      "sha256":  "626E9463723E9A253A30716013F16D4D2C1C96EF2A1C08398FAA449D36EE4120",
                       "mutable":  false
                   }
               ]

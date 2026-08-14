@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.24.1 - 2026-08-15
+
+- Removed the global FFmpeg `-flags low_delay` option from the Windows bridge. FFmpeg 8.1.1 rejects that MPEG-2-only forcing flag when the native MJPEG encoder initializes frame threading, which previously produced an immediate `ff_frame_thread_encoder_init failed` / exit `-22` restart loop even though the isolated encoder benchmark passed.
+- Upgraded the Windows runtime smoke test to exercise the production software-MJPEG profile (`q=1`, four encoder threads, optimal Huffman tables, passthrough timestamps and FIFO/MPJPEG HTTP output), and added an argument invariant that rejects reintroducing the incompatible low-delay codec flag.
+
 ## 2.24.0 - 2026-08-15
 
 - Added a redundant zero-copy video discovery path for iOS 15.8.8. SpringBoard now mirrors the current global IOSurface ID, generation and monotonic timestamp through persistent Darwin notify state, so mediaserverd and application fallbacks can consume the frame even when the tiny control IOSurface cannot be mapped across the sandbox boundary.

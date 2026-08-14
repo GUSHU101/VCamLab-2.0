@@ -38,7 +38,7 @@ install-phone.bat 192.168.0.103
 工具按修改时间选择 `packages/` 或 `artifacts/` 中最新的 `com.murkaska.virtualcampro_*_iphoneos-arm64.deb`，显示本地 SHA-256，通过 SCP 复制到 `/var/mobile`，再在手机端核对上传字节数和完整 SHA-256，并由 `dpkg-deb` 验证包内 ID、版本和架构。只有全部一致才会使用 `mobile + sudo dpkg` 安装；无论验证或安装在哪一步失败，临时上传都会自动清理。也可以显式指定安装包和端口：
 
 ```bat
-install-phone.bat 192.168.0.103 "D:\Packages\com.murkaska.virtualcampro_2.24.0_iphoneos-arm64.deb" 22
+install-phone.bat 192.168.0.103 "D:\Packages\com.murkaska.virtualcampro_2.24.1_iphoneos-arm64.deb" 22
 ```
 
 希望安装后自动写入手机 URL 和启用替换时使用：
@@ -195,7 +195,7 @@ standalone-self-test.bat
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-windows-standalone.ps1 `
-  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.24.0_iphoneos-arm64.deb" `
+  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.24.1_iphoneos-arm64.deb" `
   -CreateZip
 ```
 

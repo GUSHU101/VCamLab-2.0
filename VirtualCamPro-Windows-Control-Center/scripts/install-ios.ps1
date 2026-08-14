@@ -435,7 +435,7 @@ function Invoke-PhoneSelfTest {
         (Test-PhoneUserValue -Value "mobile@bad")) {
         Stop-PhoneTool -ExitCode 70 -Message "Phone user validation self-test failed."
     }
-    $packageName = "com.murkaska.virtualcampro_2.24.0_iphoneos-arm64.deb"
+    $packageName = "com.murkaska.virtualcampro_2.24.1_iphoneos-arm64.deb"
     if (-not (Test-PhonePackageName -Value $packageName) -or
         (Test-PhonePackageName -Value "bad;touch_iphoneos-arm64.deb")) {
         Stop-PhoneTool -ExitCode 70 -Message "Package name validation self-test failed."
