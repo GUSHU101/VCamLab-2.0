@@ -8,6 +8,7 @@
 - Extended repository validation to require content-type filename repair, fresh-asset retry budgeting, source-switch cancellation and bounded decoder recovery, and re-ran the complete Windows transport/runtime self-test.
 - Fixed a CI false-green condition found during log review: Windows source checks now stop after every nonzero child exit code, and the standalone directory has deterministic CRLF checkout bytes on Windows and Linux so its committed size/SHA-256 manifest validates identically on both runners.
 - Kept the active `AVURLAsset` cancellation handle alive through video-geometry loading and made retry cleanup identity-aware, so stopping or replacing a source cancels the complete metadata transaction without allowing an older attempt to clear a newer handle.
+- Upgraded every pinned GitHub-maintained workflow action to its current Node.js 24 release SHA (`checkout` v7.0.1, `cache` v6.1.0 and `upload-artifact` v7.0.1), eliminating the platform's Node.js 20 forced-migration warning while preserving immutable action references.
 
 ## 2.21.0 - 2026-08-15
 
