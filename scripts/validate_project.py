@@ -499,6 +499,14 @@ def validate_hooks_and_fail_open() -> None:
         ),
         "video format preservation",
     )
+    converted_entry = re.search(
+        r"typedef struct \{(?P<body>.*?)\} VCConvertedFrameEntry;",
+        converter,
+        re.DOTALL,
+    )
+    if not converted_entry or "CVPixelBufferRef sourceBuffer;" not in \
+       converted_entry.group("body"):
+        fail("converted-frame cache entry does not retain its source generation")
 
 
 def validate_package_and_docs() -> None:

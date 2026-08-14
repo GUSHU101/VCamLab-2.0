@@ -73,7 +73,6 @@ enum {
 };
 
 typedef struct {
-    CVPixelBufferRef sourceBuffer;
     size_t width;
     size_t height;
     OSType pixelFormat;
@@ -82,6 +81,7 @@ typedef struct {
 } VCPixelBufferPoolEntry;
 
 typedef struct {
+    CVPixelBufferRef sourceBuffer;
     size_t width;
     size_t height;
     OSType pixelFormat;
