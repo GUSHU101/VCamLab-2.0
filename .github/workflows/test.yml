@@ -72,10 +72,15 @@ jobs:
         shell: powershell
         run: |
           python scripts/validate_project.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/verify-standalone.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/windows-vcam.ps1 -Mode SelfTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/install-ios.ps1 -Mode SelfTest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File VirtualCamPro-Windows-Control-Center/scripts/deep-self-test.ps1 -RootPath VirtualCamPro-Windows-Control-Center
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Rebuild and verify package-free Windows companion
         shell: powershell

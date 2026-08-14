@@ -6,6 +6,7 @@
 - Added a shared fresh-asset retry loader. Import and playback now retry an immediate parse failure or empty-track result once with a new `AVURLAsset`, while retaining one 30-second overall deadline and at most 100 ms cancellation polling instead of multiplying the timeout.
 - Added one bounded local-reader recovery after a transient `AVAssetReader` failure. The stale asset/track geometry cache is discarded before reopening, but a corrupt or unsupported file still fails open after the single retry rather than entering an infinite restart loop.
 - Extended repository validation to require content-type filename repair, fresh-asset retry budgeting, source-switch cancellation and bounded decoder recovery, and re-ran the complete Windows transport/runtime self-test.
+- Fixed a CI false-green condition found during log review: Windows source checks now stop after every nonzero child exit code, and the standalone directory has deterministic CRLF checkout bytes on Windows and Linux so its committed size/SHA-256 manifest validates identically on both runners.
 
 ## 2.21.0 - 2026-08-15
 

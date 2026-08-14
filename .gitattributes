@@ -10,3 +10,8 @@ layout/DEBIAN/* text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
 *.deb binary
+
+# The standalone companion carries a byte-for-byte SHA-256 manifest. Disable
+# checkout-time newline conversion for that subtree so Windows and Linux
+# runners verify the exact committed payload bytes.
+VirtualCamPro-Windows-Control-Center/** -text

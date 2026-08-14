@@ -931,6 +931,14 @@ def validate_workflows() -> None:
         ),
         "CI workflows",
     )
+    windows_validation = read_text(".github/workflows/test.yml").split(
+        "- name: Validate Windows source scripts", 1
+    )[1].split("- name: Rebuild and verify package-free Windows companion", 1)[0]
+    if windows_validation.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") < 5:
+        fail("Windows source checks can still hide an earlier nonzero exit code")
+    attributes = read_text(".gitattributes")
+    if "VirtualCamPro-Windows-Control-Center/** -text" not in attributes:
+        fail("Windows standalone manifest inputs need byte-stable checkout behavior")
 
 
 def main() -> int:
