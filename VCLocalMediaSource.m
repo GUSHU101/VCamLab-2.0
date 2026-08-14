@@ -88,16 +88,39 @@ static const NSTimeInterval VCLocalMediaTrackLoadingTimeout = 30.0;
 - (void)runGeneration:(NSUInteger)generation {
     @autoreleasepool {
         BOOL reachedNaturalEnd = NO;
+        NSUInteger consecutiveReadFailures = 0;
         while ([self isGenerationCurrent:generation]) {
             NSError *error = nil;
             BOOL completed = [self readOnePassForGeneration:generation error:&error];
             if (![self isGenerationCurrent:generation]) return;
             if (!completed && error) {
+                if (consecutiveReadFailures == 0) {
+                    consecutiveReadFailures++;
+                    @synchronized (self) {
+                        if (self.lifecycleGeneration == generation && self.running) {
+                            self.preparedAsset = nil;
+                            self.preparedVideoTracks = nil;
+                            self.preparedAudioTracks = nil;
+                            self.preparedTrackTransform = CGAffineTransformIdentity;
+                            self.preparedTrackNaturalSize = CGSizeZero;
+                            self.preparedTrackGeometryReady = NO;
+                        }
+                    }
+                    NSLog(@"[VirtualCamPro] Retrying local media after a transient read error: %@",
+                          error.localizedDescription);
+                    if (!VCMediaWaitForRetryDelay(0.20, ^BOOL{
+                            return ![self isGenerationCurrent:generation];
+                        })) {
+                        return;
+                    }
+                    continue;
+                }
                 VCLocalMediaErrorCallback callback = self.errorCallback;
                 if (callback) callback(error);
                 NSLog(@"[VirtualCamPro] Local media error: %@", error.localizedDescription);
             }
             if (!completed) break;
+            consecutiveReadFailures = 0;
             if (!self.loops) {
                 reachedNaturalEnd = YES;
                 break;
@@ -141,19 +164,31 @@ static const NSTimeInterval VCLocalMediaTrackLoadingTimeout = 30.0;
         geometryReady = self.preparedTrackGeometryReady;
     }
     if (!asset) {
-        asset = [AVURLAsset URLAssetWithURL:self.fileURL
-            options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
-        @synchronized (self) {
-            if (!self.running || self.lifecycleGeneration != generation) return NO;
-            self.loadingAsset = asset;
-        }
         NSError *loadingError = nil;
-        VCMediaTrackLoadResult loadingResult = VCMediaLoadTracks(
-            asset,
+        VCMediaTrackLoadResult loadingResult = VCMediaLoadTracksFromURL(
+            self.fileURL,
+            @{AVURLAssetPreferPreciseDurationAndTimingKey: @NO},
             VCLocalMediaTrackLoadingTimeout,
+            2,
             ^BOOL{
                 return ![self isGenerationCurrent:generation];
             },
+            ^(AVURLAsset *observedAsset, BOOL loading) {
+                BOOL cancelObservedAsset = NO;
+                @synchronized (self) {
+                    BOOL current = self.running &&
+                        self.lifecycleGeneration == generation;
+                    if (loading && current) {
+                        self.loadingAsset = observedAsset;
+                    } else if (loading) {
+                        cancelObservedAsset = YES;
+                    } else if (self.loadingAsset == observedAsset) {
+                        self.loadingAsset = nil;
+                    }
+                }
+                if (cancelObservedAsset) [observedAsset cancelLoading];
+            },
+            &asset,
             &videoTracks,
             &audioTracks,
             &loadingError);

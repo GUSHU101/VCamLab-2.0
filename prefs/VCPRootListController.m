@@ -2,6 +2,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <AVFoundation/AVFoundation.h>
 #import <PhotosUI/PhotosUI.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <UIKit/UIKit.h>
 #import <limits.h>
 #import <mach/mach_time.h>
@@ -76,7 +77,47 @@ static NSError *VCLocalMediaError(VCLocalMediaImportError code,
     return [NSError errorWithDomain:VCLocalMediaImportErrorDomain code:code userInfo:userInfo];
 }
 
-static NSString *VCSafeLocalMediaFilename(NSURL *sourceURL, NSString *suggestedName) {
+static BOOL VCIsPlausibleLocalMediaExtension(NSString *extension) {
+    if (extension.length == 0 || extension.length > 16) return NO;
+    static NSCharacterSet *invalidExtensionCharacters;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        invalidExtensionCharacters =
+            NSCharacterSet.alphanumericCharacterSet.invertedSet;
+    });
+    return [extension rangeOfCharacterFromSet:invalidExtensionCharacters].location ==
+        NSNotFound;
+}
+
+static BOOL VCIsKnownLocalMediaExtension(NSString *extension) {
+    static NSSet<NSString *> *knownExtensions;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        knownExtensions = [NSSet setWithArray:@[
+            @"mp4", @"mov", @"m4v", @"3gp", @"3g2", @"avi",
+            @"mpg", @"mpeg", @"ts", @"mts", @"m2ts",
+            @"mp3", @"m4a", @"aac", @"wav", @"aif", @"aiff",
+            @"caf", @"flac",
+        ]];
+    });
+    return [knownExtensions containsObject:extension.lowercaseString];
+}
+
+static NSString *VCPreferredLocalMediaExtension(NSURL *sourceURL,
+                                                 BOOL requiresVideoTrack) {
+    UTType *contentType = nil;
+    [sourceURL getResourceValue:&contentType forKey:NSURLContentTypeKey error:nil];
+    NSString *extension = contentType.preferredFilenameExtension.lowercaseString;
+    if (VCIsPlausibleLocalMediaExtension(extension)) return extension;
+
+    extension = sourceURL.pathExtension.lowercaseString;
+    if (VCIsPlausibleLocalMediaExtension(extension)) return extension;
+    return requiresVideoTrack ? @"mov" : nil;
+}
+
+static NSString *VCSafeLocalMediaFilename(NSURL *sourceURL,
+                                           NSString *suggestedName,
+                                           BOOL requiresVideoTrack) {
     NSString *filename = suggestedName.lastPathComponent;
     if (filename.length == 0) filename = sourceURL.lastPathComponent;
     if (filename.length == 0) filename = @"media.mov";
@@ -90,6 +131,13 @@ static NSString *VCSafeLocalMediaFilename(NSURL *sourceURL, NSString *suggestedN
     if (filename.length == 0 || [filename isEqualToString:@"."] ||
         [filename isEqualToString:@".."]) {
         filename = @"media.mov";
+    }
+    if (!VCIsKnownLocalMediaExtension(filename.pathExtension)) {
+        NSString *extension = VCPreferredLocalMediaExtension(sourceURL,
+                                                              requiresVideoTrack);
+        if (extension.length > 0) {
+            filename = [filename stringByAppendingPathExtension:extension];
+        }
     }
     return filename;
 }
@@ -132,14 +180,16 @@ static NSURL *VCUniqueLocalMediaDestination(NSString *directory, NSString *filen
 static BOOL VCAssetContainsRecognizableMediaTracks(NSURL *url,
                                                     BOOL requiresVideoTrack,
                                                     NSError **errorOut) {
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url
-        options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
     NSArray<AVAssetTrack *> *videoTracks = nil;
     NSArray<AVAssetTrack *> *audioTracks = nil;
     NSError *loadingError = nil;
-    VCMediaTrackLoadResult result = VCMediaLoadTracks(
-        asset,
+    VCMediaTrackLoadResult result = VCMediaLoadTracksFromURL(
+        url,
+        @{AVURLAssetPreferPreciseDurationAndTimingKey: @NO},
         VCLocalMediaTrackLoadingTimeout,
+        2,
+        nil,
+        nil,
         nil,
         &videoTracks,
         &audioTracks,
@@ -213,7 +263,9 @@ static NSURL *VCImportLocalMediaURL(NSURL *sourceURL,
         return nil;
     }
 
-    NSString *filename = VCSafeLocalMediaFilename(sourceURL, suggestedName);
+    NSString *filename = VCSafeLocalMediaFilename(sourceURL,
+                                                   suggestedName,
+                                                   requiresVideoTrack);
     NSString *extension = filename.pathExtension;
     NSString *stagingName = extension.length > 0
         ? [NSString stringWithFormat:@".%@.importing.%@", NSUUID.UUID.UUIDString, extension]

@@ -35,9 +35,9 @@ ls -la /var/jb/Library/PreferenceLoader/Preferences/VirtualCamPro.plist
 
 ## 点击 VirtualCamPro 后设置闪退
 
-先确认安装的是 2.21.0 或更高版本。该版本不再在页面加载阶段安装自定义 table header，也不为设置面板单独链接 QuartzCore；动态状态只在导航转场结束后使用 iOS 15 兼容的一参数 selector 刷新。可选刷新异常会自动停表，原生开关和来源配置仍应可用。
+先确认安装的是 2.22.0 或更高版本。该版本不再在页面加载阶段安装自定义 table header，也不为设置面板单独链接 QuartzCore；动态状态只在导航转场结束后使用 iOS 15 兼容的一参数 selector 刷新。可选刷新异常会自动停表，原生开关和来源配置仍应可用。
 
-如果 2.21.0 仍闪退，先从 `/var/mobile/Library/Logs/CrashReporter/` 导出最新的 `Preferences-*.ips` 或 `Preferences-*.crash`，不要只提供“闪退”截图：
+如果 2.22.0 仍闪退，先从 `/var/mobile/Library/Logs/CrashReporter/` 导出最新的 `Preferences-*.ips` 或 `Preferences-*.crash`，不要只提供“闪退”截图：
 
 ```bash
 ls -lt /var/mobile/Library/Logs/CrashReporter/Preferences* | head
@@ -47,7 +47,7 @@ ls -lt /var/mobile/Library/Logs/CrashReporter/Preferences* | head
 
 ## 选择本地视频时提示导入失败
 
-先确认安装的是 2.21.0 或更高版本。旧版在文件复制后立即同步读取 AVAsset 轨道，照片、iCloud 或刚完成编辑/旋转的视频可能在轨道元数据尚未加载时被误报为“不包含可识别的视频或音频轨道”。2.21.0 让导入和实际播放共用可取消、30 秒封顶的异步轨道加载器，并在播放前异步准备旋转矩阵和自然尺寸；PHPicker 同时要求兼容表示和真实视频轨道。
+先确认安装的是 2.22.0 或更高版本。旧版在文件复制后立即同步读取 AVAsset 轨道，照片、iCloud、刚完成编辑/旋转的视频，以及提供器返回的无后缀临时文件，都可能被误报为“不包含可识别的视频或音频轨道”。2.22.0 会先按内容类型修复文件后缀，再让导入和实际播放共用可取消、30 秒总预算的异步轨道加载器；瞬时空轨道或解析失败会用全新的 `AVURLAsset` 重试一次，PHPicker 同时要求兼容表示和真实视频轨道。
 
 - “读取媒体轨道超时”：视频可能仍在 iCloud，先在照片中完整播放或下载后重试。
 - “AVFoundation 无法读取”：保留的错误详情表示容器损坏、受保护或编码不受当前 iOS 支持。

@@ -187,9 +187,13 @@ def validate_preferences() -> None:
             '@"/var/mobile/Media/VirtualCamPro"',
             "NSFileSystemFreeSize",
             "VCAssetContainsRecognizableMediaTracks",
-            "VCMediaLoadTracks",
+            "VCMediaLoadTracksFromURL",
             "VCLocalMediaTrackLoadingTimeout",
             "VCLocalMediaImportErrorTrackLoadingTimeout",
+            "UniformTypeIdentifiers/UniformTypeIdentifiers.h",
+            "NSURLContentTypeKey",
+            "VCPreferredLocalMediaExtension",
+            "VCIsKnownLocalMediaExtension",
             "PHPickerConfigurationAssetRepresentationModeCompatible",
             "CFPreferencesSetAppValue(VCLocalMediaPathKey",
             "picker.allowsMultipleSelection = YES",
@@ -251,6 +255,11 @@ def validate_preferences() -> None:
             "NSProcessInfo.processInfo.systemUptime",
             "[asset cancelLoading]",
             "VCMediaLoadVideoTrackGeometry",
+            "VCMediaLoadTracksFromURL",
+            "VCMediaWaitForRetryDelay",
+            "maximumAttempts",
+            "fresh asset",
+            "AVURLAsset *asset, BOOL loading",
             'loadValuesAsynchronouslyForKeys:@[@"preferredTransform", @"naturalSize"]',
             'statusOfValueForKey:@"preferredTransform"',
             'statusOfValueForKey:@"naturalSize"',
@@ -281,6 +290,8 @@ def validate_preferences() -> None:
                  legacy_dashboard_symbol)
     if "QuartzCore" in bundle_makefile:
         fail("preference bundle must not require the optional QuartzCore dashboard")
+    if "UniformTypeIdentifiers" not in bundle_makefile:
+        fail("preference bundle must link media filename type inference")
     specifier_loader = controller.split("- (NSArray *)specifiers", 1)[1].split(
         "- (void)setPreferenceValue:", 1
     )[0]
@@ -489,9 +500,10 @@ def validate_zero_copy_bus() -> None:
             "VCLocalMediaCompletionCallback",
             "reachedNaturalEnd",
             '#import "VCMediaTrackLoader.h"',
-            "VCMediaLoadTracks",
+            "VCMediaLoadTracksFromURL",
             "VCMediaTrackLoadResultCancelled",
-            "self.loadingAsset = asset",
+            "if (loading && current)",
+            "self.loadingAsset == observedAsset",
             "[loadingAsset cancelLoading]",
             "self.preparedAsset = asset",
             "VCMediaLoadVideoTrackGeometry",
@@ -499,6 +511,9 @@ def validate_zero_copy_bus() -> None:
             "self.preparedTrackTransform = preferredTransform",
             "self.preparedTrackNaturalSize = naturalSize",
             "self.preparedTrackGeometryReady = geometryReady",
+            "consecutiveReadFailures",
+            "Retrying local media after a transient read error",
+            "VCMediaWaitForRetryDelay(0.20",
         ),
         "local media producer",
     )
@@ -821,6 +836,9 @@ def validate_package_and_docs() -> None:
         fail("Windows companion and iOS package versions do not match")
     if manifest.get("packageIncluded") is not False:
         fail("source-tree standalone manifest must not advertise a stale bundled package")
+    standalone_builder = read_text("tools/build-windows-standalone.ps1")
+    if '.Replace("`r`n", "`n")' not in standalone_builder:
+        fail("generated standalone manifest needs canonical LF JSON formatting")
 
     package_verifier = read_text("scripts/verify_deb.sh")
     require(
@@ -918,6 +936,14 @@ def validate_workflows() -> None:
         ),
         "CI workflows",
     )
+    windows_validation = read_text(".github/workflows/test.yml").split(
+        "- name: Validate Windows source scripts", 1
+    )[1].split("- name: Rebuild and verify package-free Windows companion", 1)[0]
+    if windows_validation.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") < 5:
+        fail("Windows source checks can still hide an earlier nonzero exit code")
+    attributes = read_text(".gitattributes")
+    if "VirtualCamPro-Windows-Control-Center/** -text" not in attributes:
+        fail("Windows standalone manifest inputs need byte-stable checkout behavior")
 
 
 def main() -> int:

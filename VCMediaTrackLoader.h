@@ -12,6 +12,25 @@ typedef NS_ENUM(NSInteger, VCMediaTrackLoadResult) {
 };
 
 typedef BOOL (^VCMediaTrackLoadCancellationBlock)(void);
+typedef void (^VCMediaTrackAssetObserverBlock)(AVURLAsset *asset, BOOL loading);
+
+static inline BOOL VCMediaWaitForRetryDelay(
+    NSTimeInterval delay,
+    VCMediaTrackLoadCancellationBlock cancellationBlock) {
+    if (!isfinite(delay) || delay <= 0) {
+        return !(cancellationBlock && cancellationBlock());
+    }
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + delay;
+    dispatch_semaphore_t waitSemaphore = dispatch_semaphore_create(0);
+    while (NSProcessInfo.processInfo.systemUptime < deadline) {
+        if (cancellationBlock && cancellationBlock()) return NO;
+        NSTimeInterval remaining = deadline - NSProcessInfo.processInfo.systemUptime;
+        int64_t slice = (int64_t)(MIN(0.05, MAX(0.001, remaining)) * NSEC_PER_SEC);
+        dispatch_semaphore_wait(waitSemaphore,
+                                dispatch_time(DISPATCH_TIME_NOW, slice));
+    }
+    return !(cancellationBlock && cancellationBlock());
+}
 
 static inline VCMediaTrackLoadResult VCMediaLoadVideoTrackGeometry(
     AVAsset *asset,
@@ -125,6 +144,83 @@ static inline VCMediaTrackLoadResult VCMediaLoadTracks(
     }
     if (loadingErrorOut) *loadingErrorOut = videoError ?: audioError;
     return VCMediaTrackLoadResultFailed;
+}
+
+// File-provider and Photos URLs can become readable just before AVFoundation's
+// metadata cache observes the completed file. A second request on the same
+// AVURLAsset can reuse that empty/failed cache, so retries deliberately create
+// a fresh asset while sharing one overall timeout budget.
+static inline VCMediaTrackLoadResult VCMediaLoadTracksFromURL(
+    NSURL *url,
+    NSDictionary *options,
+    NSTimeInterval timeout,
+    NSUInteger maximumAttempts,
+    VCMediaTrackLoadCancellationBlock cancellationBlock,
+    VCMediaTrackAssetObserverBlock assetObserver,
+    AVURLAsset * __autoreleasing *loadedAssetOut,
+    NSArray<AVAssetTrack *> * __autoreleasing *videoTracksOut,
+    NSArray<AVAssetTrack *> * __autoreleasing *audioTracksOut,
+    NSError * __autoreleasing *loadingErrorOut) {
+    if (loadedAssetOut) *loadedAssetOut = nil;
+    if (videoTracksOut) *videoTracksOut = nil;
+    if (audioTracksOut) *audioTracksOut = nil;
+    if (loadingErrorOut) *loadingErrorOut = nil;
+    if (!url.isFileURL || !isfinite(timeout) || timeout <= 0) {
+        return VCMediaTrackLoadResultFailed;
+    }
+
+    NSUInteger attempts = MAX((NSUInteger)1, MIN((NSUInteger)3, maximumAttempts));
+    NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + timeout;
+    VCMediaTrackLoadResult finalResult = VCMediaTrackLoadResultFailed;
+    NSError *finalError = nil;
+
+    for (NSUInteger attempt = 0; attempt < attempts; attempt++) {
+        if (cancellationBlock && cancellationBlock()) {
+            finalResult = VCMediaTrackLoadResultCancelled;
+            break;
+        }
+        NSTimeInterval remaining = deadline - NSProcessInfo.processInfo.systemUptime;
+        if (remaining <= 0) {
+            finalResult = VCMediaTrackLoadResultTimedOut;
+            break;
+        }
+
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:options];
+        if (assetObserver) assetObserver(asset, YES);
+        NSArray<AVAssetTrack *> *videoTracks = nil;
+        NSArray<AVAssetTrack *> *audioTracks = nil;
+        NSError *attemptError = nil;
+        VCMediaTrackLoadResult result = VCMediaLoadTracks(asset,
+                                                           remaining,
+                                                           cancellationBlock,
+                                                           &videoTracks,
+                                                           &audioTracks,
+                                                           &attemptError);
+        if (result == VCMediaTrackLoadResultLoaded &&
+            (videoTracks.count > 0 || audioTracks.count > 0)) {
+            if (loadedAssetOut) *loadedAssetOut = asset;
+            if (videoTracksOut) *videoTracksOut = videoTracks;
+            if (audioTracksOut) *audioTracksOut = audioTracks;
+            return VCMediaTrackLoadResultLoaded;
+        }
+
+        if (assetObserver) assetObserver(asset, NO);
+        finalResult = result;
+        finalError = attemptError;
+        [asset cancelLoading];
+        if (result == VCMediaTrackLoadResultCancelled ||
+            result == VCMediaTrackLoadResultTimedOut) {
+            break;
+        }
+        if (attempt + 1 < attempts &&
+            !VCMediaWaitForRetryDelay(0.12, cancellationBlock)) {
+            finalResult = VCMediaTrackLoadResultCancelled;
+            break;
+        }
+    }
+
+    if (loadingErrorOut) *loadingErrorOut = finalError;
+    return finalResult;
 }
 
 #endif

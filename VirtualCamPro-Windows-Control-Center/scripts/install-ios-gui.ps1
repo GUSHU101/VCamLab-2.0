@@ -170,7 +170,7 @@ function Invoke-GuiSelfTest {
     }
     $testCommand = New-GuiInstallerCommand -Mode "Setup" -HostName "192.168.0.103" `
         -Port 22 -FPS 60 -Transport "hls" `
-        -PackagePath "C:\build\com.murkaska.virtualcampro_2.21.0_iphoneos-arm64.deb" `
+        -PackagePath "C:\build\com.murkaska.virtualcampro_2.22.0_iphoneos-arm64.deb" `
         -StreamURL "" -LogPath "C:\logs\deploy.log"
     foreach ($fragment in @("-Mode 'Setup'", "-PhoneHost '192.168.0.103'", "-PreferredFPS '60'",
             "-Transport 'hls'", "-LogPath 'C:\logs\deploy.log'")) {
@@ -536,7 +536,7 @@ function Start-GuiDeepSelfTest {
 }
 
 $form = New-Object Windows.Forms.Form
-$form.Text = "VirtualCamPro Windows 控制中心 2.21.0"
+$form.Text = "VirtualCamPro Windows 控制中心 2.22.0"
 $form.StartPosition = [Windows.Forms.FormStartPosition]::CenterScreen
 $form.Size = New-Object Drawing.Size(1000, 790)
 $form.MinimumSize = New-Object Drawing.Size(1000, 790)
