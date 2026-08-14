@@ -89,8 +89,11 @@ def validate_makefile() -> None:
 def validate_preferences() -> None:
     implementation = read_text("VCPreferences.m")
     header = read_text("VCPreferences.h")
+    controller = read_text("prefs/VCPRootListController.m")
+    bundle_makefile = read_text("prefs/Makefile")
     root = read_plist("prefs/Resources/Root.plist")
-    keyed = {item.get("key"): item for item in root.get("items", []) if item.get("key")}
+    items = root.get("items", [])
+    keyed = {item.get("key"): item for item in items if item.get("key")}
     expected = {
         "enabled",
         "sourceType",
@@ -119,6 +122,16 @@ def validate_preferences() -> None:
             fail(f"VCPreferences.m missing key constant: {key}")
     if keyed.get("sourceType", {}).get("validValues") != [0, 1, 2]:
         fail("sourceType must expose network, screen, and local media")
+    for item in items:
+        if item.get("cell") != "PSLinkListCell":
+            continue
+        key = item.get("key", "<unknown>")
+        if item.get("detail") != "PSListItemsController":
+            fail(f"{key} link-list is missing PSListItemsController (opens a blank page)")
+        titles = item.get("validTitles")
+        values = item.get("validValues")
+        if not isinstance(titles, list) or not titles or len(titles) != len(values or []):
+            fail(f"{key} link-list titles and values must be non-empty and aligned")
     if keyed.get("enabled", {}).get("default") is not False:
         fail("replacement must remain disabled by default")
     if keyed.get("loopLocalMedia", {}).get("default") is not True:
@@ -135,6 +148,30 @@ def validate_preferences() -> None:
     ):
         if keyed.get(key, {}).get("vcSourceTypes") != [2]:
             fail(f"{key} must be presented as a local-media-only setting")
+    local_media = keyed.get("localMediaPath", {})
+    if local_media.get("cell") != "PSTitleValueCell" or \
+            local_media.get("get") != "currentLocalMediaName:":
+        fail("localMediaPath must be a read-only current-media status row")
+    actions = {item.get("action"): item for item in items if item.get("action")}
+    for action in ("chooseLocalMedia:", "clearLocalMedia:"):
+        if actions.get(action, {}).get("vcSourceTypes") != [2]:
+            fail(f"missing local-media-only settings action: {action}")
+    require(
+        controller,
+        (
+            "UIDocumentPickerViewController",
+            "PHPickerViewController",
+            "startAccessingSecurityScopedResource",
+            "NSFileCoordinator",
+            '@"/var/mobile/Media/VirtualCamPro"',
+            "NSFileSystemFreeSize",
+            "AVMediaTypeVideo",
+            "AVMediaTypeAudio",
+            "CFPreferencesSetAppValue(VCLocalMediaPathKey",
+        ),
+        "native local-media picker",
+    )
+    require(bundle_makefile, ("AVFoundation", "PhotosUI"), "preference bundle frameworks")
     if "compatibilityMode" in keyed or "VCCompatibilityModeKey" in header:
         fail("the obsolete manual compatibility mode is still exposed")
     require(

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.11.0 - 2026-08-14
+
+- Fixed every `PSLinkListCell` by explicitly routing it through `PSListItemsController`, so “替换来源”、本地解码质量和本地旋转 no longer open an empty settings page.
+- Replaced editable local-media paths with a native action sheet that can select video/audio from Files or video from Photos, then automatically stores the selected stable path.
+- Added coordinated security-scoped import into `/var/mobile/Media/VirtualCamPro/`, collision-free filenames, free-space reserve checks, staging copies, audio/video track validation and atomic finalization; existing files are never overwritten.
+- Added current-media status and a non-destructive clear action. Imported files remain available for volume-button playlist navigation instead of being deleted behind the user's back.
+- Extended source and package validation to reject empty link-list controllers, missing picker actions/frameworks, missing `Root.plist`, or missing PreferenceLoader registration before a release can pass CI.
+
 ## 2.10.0 - 2026-08-14
 
 - Made network sources sender-authoritative: phone rotation, mirroring, FPS, JPEG quality, aspect and decode-size preferences are ignored for HLS/MJPEG, and network/ screen sources always preserve the native microphone.

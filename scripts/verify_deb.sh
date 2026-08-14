@@ -62,6 +62,8 @@ required_files=(
   "var/jb/Library/MobileSubstrate/DynamicLibraries/VCMediaServer.dylib"
   "var/jb/Library/MobileSubstrate/DynamicLibraries/VCMediaServer.plist"
   "var/jb/Library/PreferenceBundles/VirtualCamPro.bundle/Info.plist"
+  "var/jb/Library/PreferenceBundles/VirtualCamPro.bundle/Root.plist"
+  "var/jb/Library/PreferenceLoader/Preferences/VirtualCamPro.plist"
   "var/jb/usr/bin/virtualcampro-config"
 )
 for relative_path in "${required_files[@]}"; do

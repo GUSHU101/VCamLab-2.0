@@ -5,7 +5,7 @@
 
 VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/麦克风插件。SpringBoard 进程只生成一份媒体流，`mediaserverd` 在 `CMCapture` 相机媒体图的 `BWNodeOutput` 处替换真实 `CMSampleBuffer`；照片、录像、视频通话、WebRTC 与扫码等下游因此读取同一份替换样本，而不是在界面上覆盖一层图片。
 
-当前版本：`2.10.0`
+当前版本：`2.11.0`
 
 > 正式 `.deb` 由 GitHub Actions 从当前提交构建并作为 `VirtualCamPro-rootless` artifact 发布；不要混用历史 2.8.0 二进制。
 
@@ -16,6 +16,7 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - 自动回退：系统 Hook 只有在实际成功输出替换样本后才发布短心跳。应用内 `AVCaptureVideoDataOutput`、`AVCaptureAudioDataOutput`、预览与照片 Hook 根据心跳自动旁路或接管，不再提供手动“兼容模式”。
 - 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface，通知中只传递 Surface ID 与代次；消费者映射同一块物理内存，不复制或序列化整帧。
 - 本地媒体：MP4/MOV 等视频可同时替换摄像头和麦克风；纯 MP3/M4A 只替换麦克风，画面继续使用物理摄像头。
+- 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”选择视频/音频或从“照片”选择视频；无需手工输入路径。导入会先检查空间和音视频轨道，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
 - 屏幕镜像：SpringBoard 通过 CoreAnimation 直接渲染到 IOSurface，再交给系统相机管线。
 - HLS：URL 中包含 `.m3u8` 时使用 `AVPlayerItemVideoOutput` 解码。
 - MJPEG：其他 HTTP/HTTPS URL 按连续 JPEG 流解析；增量校验 JPEG 段结构、直接读取 SOF 尺寸并限制单帧与接收缓冲。优先尝试实时 VideoToolbox→IOSurface NV12 解码，不支持时自动回退 ImageIO。

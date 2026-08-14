@@ -20,6 +20,7 @@
         </dict>
         <dict>
             <key>cell</key><string>PSLinkListCell</string>
+            <key>detail</key><string>PSListItemsController</string>
             <key>default</key><integer>0</integer>
             <key>defaults</key><string>com.murkaska.virtualcampro</string>
             <key>key</key><string>sourceType</string>
@@ -69,17 +70,28 @@
             <key>cell</key><string>PSGroupCell</string>
             <key>label</key><string>手机本地媒体</string>
             <key>vcSourceTypes</key><array><integer>2</integer></array>
-            <key>footerText</key><string>以下画面设置仅作用于手机本地视频。播放期间按音量加键切换到同目录下一段视频，按音量减键切换到上一段；存在可切换视频时按键由播放列表接管。</string>
+            <key>footerText</key><string>可直接从“文件”选择视频或音频，也可从“照片”选择视频。所选媒体会复制到 /var/mobile/Media/VirtualCamPro/，避免文件提供器临时 URL 在 SpringBoard 中失效。播放期间按音量加/减切换同目录下一段/上一段视频。</string>
         </dict>
         <dict>
-            <key>cell</key><string>PSEditTextCell</string>
-            <key>default</key><string></string>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>选择本地视频 / 音频</string>
+            <key>action</key><string>chooseLocalMedia:</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
             <key>defaults</key><string>com.murkaska.virtualcampro</string>
             <key>key</key><string>localMediaPath</string>
-            <key>label</key><string>本地媒体路径</string>
-            <key>placeholder</key><string>/var/mobile/Media/VirtualCam/demo.mp4</string>
+            <key>label</key><string>当前媒体</string>
+            <key>get</key><string>currentLocalMediaName:</string>
             <key>vcSourceTypes</key><array><integer>2</integer></array>
             <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>清除当前媒体选择</string>
+            <key>action</key><string>clearLocalMedia:</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
         </dict>
         <dict>
             <key>cell</key><string>PSSwitchCell</string>
@@ -104,6 +116,7 @@
         </dict>
         <dict>
             <key>cell</key><string>PSLinkListCell</string>
+            <key>detail</key><string>PSListItemsController</string>
             <key>default</key><integer>1920</integer>
             <key>defaults</key><string>com.murkaska.virtualcampro</string>
             <key>key</key><string>maximumPixelDimension</string>
@@ -120,6 +133,7 @@
         </dict>
         <dict>
             <key>cell</key><string>PSLinkListCell</string>
+            <key>detail</key><string>PSListItemsController</string>
             <key>default</key><integer>0</integer>
             <key>defaults</key><string>com.murkaska.virtualcampro</string>
             <key>key</key><string>sourceRotation</string>
