@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.17.0 - 2026-08-14
+
+- Generation-gated every screen, local-file and network error callback so a delayed failure from an already stopped producer can no longer overwrite the live status of a newly selected source.
+- Added an explicit non-looping local-media completion lifecycle. Natural EOF now reports “completed”, immediately invalidates the shared PCM ring so the physical microphone resumes without the former freshness tail, and leaves video retention to the configured last-frame policy.
+- Corrected source-error status selection to honor “hold last frame”; an existing frame is no longer reported as held when the user explicitly disabled retention.
+- Reused four process-lifetime Darwin notify tokens in the visible Settings dashboard and coalesced repeated CFPreferences synchronizations across its one-second refresh pass, removing repeated register/cancel and disk/domain synchronization churn.
+- Bounded missing-screen-geometry retries to the same roughly 4 Hz cadence as rotation polling, preventing transient UIKit unavailability from scheduling one SpringBoard-main query per capture frame.
+- Extended repository invariants and the iOS 15.8.8 device plan for stale callback isolation, local EOF audio release, Settings polling overhead and screen-geometry retry storms.
+
 ## 2.16.0 - 2026-08-14
 
 - Rebuilt the iOS PreferenceLoader page around a dynamic, accessibility-aware status card that shows enablement, selected source, SpringBoard producer health and recent mediaserverd video activity without requiring the user to interpret raw controls.

@@ -52,7 +52,6 @@ static NSString * const VCLocalMediaErrorDomain =
 
 - (void)stop {
     @synchronized (self) {
-        if (!self.running && !self.reader) return;
         self.running = NO;
         self.lifecycleGeneration++;
         [self.reader cancelReading];
@@ -69,6 +68,7 @@ static NSString * const VCLocalMediaErrorDomain =
 
 - (void)runGeneration:(NSUInteger)generation {
     @autoreleasepool {
+        BOOL reachedNaturalEnd = NO;
         while ([self isGenerationCurrent:generation]) {
             NSError *error = nil;
             BOOL completed = [self readOnePassForGeneration:generation error:&error];
@@ -78,13 +78,28 @@ static NSString * const VCLocalMediaErrorDomain =
                 if (callback) callback(error);
                 NSLog(@"[VirtualCamPro] Local media error: %@", error.localizedDescription);
             }
-            if (!completed || !self.loops) break;
+            if (!completed) break;
+            if (!self.loops) {
+                reachedNaturalEnd = YES;
+                break;
+            }
         }
+        BOOL notifyCompletion = NO;
         @synchronized (self) {
             if (self.lifecycleGeneration == generation) {
                 self.running = NO;
                 self.reader = nil;
+                notifyCompletion = reachedNaturalEnd;
             }
+        }
+        if (notifyCompletion) {
+            VCLocalMediaCompletionCallback callback = nil;
+            @synchronized (self) {
+                if (self.lifecycleGeneration == generation && !self.running) {
+                    callback = self.completionCallback;
+                }
+            }
+            if (callback) callback();
         }
     }
 }

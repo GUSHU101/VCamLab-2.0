@@ -22,6 +22,7 @@ typedef NS_ENUM(uint64_t, VCStreamStatus) {
     VCStreamStatusReceiving = 2,
     VCStreamStatusError = 3,
     VCStreamStatusHoldingLastFrame = 4,
+    VCStreamStatusCompleted = 5,
 };
 
 @interface VCStreamCoordinator () {
@@ -62,6 +63,9 @@ typedef NS_ENUM(uint64_t, VCStreamStatus) {
 @property (nonatomic, strong) dispatch_queue_t frameProcessingQueue;
 @property (nonatomic, strong) dispatch_source_t memoryPressureSource;
 - (void)clearPendingFrames;
+- (BOOL)sourceGenerationIsCurrent:(NSUInteger)generation;
+- (void)producerFailedWithError:(NSError *)error
+               sourceGeneration:(NSUInteger)sourceGeneration;
 @end
 
 static BOOL VCURLHasSupportedLocalVideoExtension(NSURL *url) {
@@ -391,7 +395,8 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
                                          trackMirror:NO];
             };
             source.errorCallback = ^(NSError *error) {
-                [weakSelf producerFailedWithError:error];
+                [weakSelf producerFailedWithError:error
+                                  sourceGeneration:sourceGeneration];
             };
             self.screenSource = source;
             [source start];
@@ -421,7 +426,18 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
                 }
             };
             source.errorCallback = ^(NSError *error) {
-                [weakSelf producerFailedWithError:error];
+                [weakSelf producerFailedWithError:error
+                                  sourceGeneration:sourceGeneration];
+            };
+            source.completionCallback = ^{
+                VCStreamCoordinator *strongSelf = weakSelf;
+                if (!strongSelf ||
+                    ![strongSelf sourceGenerationIsCurrent:sourceGeneration]) return;
+                // Video may intentionally remain on the last frame, but stale
+                // local PCM must stop immediately instead of replacing the mic
+                // for another two seconds after natural EOF.
+                [[VCSharedAudioServer sharedServer] invalidate];
+                [strongSelf publishStreamStatus:VCStreamStatusCompleted];
             };
             self.localSource = source;
             [source start];
@@ -435,7 +451,8 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
                                          trackMirror:NO];
             };
             source.errorCallback = ^(NSError *error) {
-                [weakSelf producerFailedWithError:error];
+                [weakSelf producerFailedWithError:error
+                                  sourceGeneration:sourceGeneration];
             };
             self.networkSource = source;
             [source startStreaming];
@@ -450,8 +467,13 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     return current;
 }
 
-- (void)producerFailedWithError:(NSError *)error {
-    BOOL holding = [[VCSharedVideoClient sharedClient]
+- (void)producerFailedWithError:(NSError *)error
+               sourceGeneration:(NSUInteger)sourceGeneration {
+    if (![self sourceGenerationIsCurrent:sourceGeneration]) return;
+    os_unfair_lock_lock(&_stateLock);
+    BOOL holdLastFrame = _configuredHoldLastFrame;
+    os_unfair_lock_unlock(&_stateLock);
+    BOOL holding = holdLastFrame && [[VCSharedVideoClient sharedClient]
         hasPublishedFrameWithMaximumAge:365.0 * 24.0 * 60.0 * 60.0];
     [self publishStreamStatus:holding ? VCStreamStatusHoldingLastFrame
                                       : VCStreamStatusError];
@@ -652,6 +674,12 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     AVAssetStreamAdapter *network = self.networkSource;
     VCScreenCaptureSource *screen = self.screenSource;
     VCLocalMediaSource *local = self.localSource;
+    // Retire the generation before touching producer callbacks. A callback
+    // already copied by another queue must observe staleness immediately,
+    // including during the stop/cancel window itself.
+    os_unfair_lock_lock(&_stateLock);
+    _sourceGeneration++;
+    os_unfair_lock_unlock(&_stateLock);
     self.networkSource = nil;
     self.screenSource = nil;
     self.localSource = nil;
@@ -665,12 +693,10 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     local.videoCallback = nil;
     local.audioCallback = nil;
     local.errorCallback = nil;
+    local.completionCallback = nil;
     [network stopStreaming];
     [screen stop];
     [local stop];
-    os_unfair_lock_lock(&_stateLock);
-    _sourceGeneration++;
-    os_unfair_lock_unlock(&_stateLock);
     [self clearPendingFrames];
     [[VCSharedVideoServer sharedServer] invalidate];
     [[VCSharedAudioServer sharedServer] invalidate];

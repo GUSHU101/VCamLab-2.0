@@ -18,15 +18,29 @@ static CFStringRef const VCSourceRestartTokenKey = CFSTR("sourceRestartToken");
 static NSString * const VCLocalMediaDirectory = @"/var/mobile/Media/VirtualCamPro";
 static NSString * const VCLocalMediaImportErrorDomain = @"com.murkaska.virtualcampro.media-import";
 static const unsigned long long VCLocalMediaReserveBytes = 64ULL * 1024ULL * 1024ULL;
-static const char *VCStreamStatusNotificationName =
-    "com.murkaska.virtualcampro/stream.status";
-static const char *VCLocalTransformStatusNotificationName =
-    "com.murkaska.virtualcampro/local-transform.status";
-static const char *VCLocalVolumeHookStatusNotificationName =
-    "com.murkaska.virtualcampro/local-volume-hook.status";
-static const char *VCVideoPipelineHeartbeatNotificationName =
-    "com.murkaska.virtualcampro/pipeline.video.heartbeat.v1";
 static const NSUInteger VCPStreamTestMaximumBytes = 8 * 1024 * 1024;
+
+typedef NS_ENUM(NSUInteger, VCPNotifyChannel) {
+    VCPNotifyChannelStreamStatus = 0,
+    VCPNotifyChannelLocalTransform,
+    VCPNotifyChannelLocalVolumeHook,
+    VCPNotifyChannelVideoPipeline,
+    VCPNotifyChannelCount,
+};
+
+static const char *VCPNotifyChannelNames[VCPNotifyChannelCount] = {
+    [VCPNotifyChannelStreamStatus] =
+        "com.murkaska.virtualcampro/stream.status",
+    [VCPNotifyChannelLocalTransform] =
+        "com.murkaska.virtualcampro/local-transform.status",
+    [VCPNotifyChannelLocalVolumeHook] =
+        "com.murkaska.virtualcampro/local-volume-hook.status",
+    [VCPNotifyChannelVideoPipeline] =
+        "com.murkaska.virtualcampro/pipeline.video.heartbeat.v1",
+};
+
+static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
+                                     uint64_t *stateOut);
 
 typedef NS_ENUM(uint64_t, VCPStreamStatus) {
     VCPStreamStatusDisabled = 0,
@@ -34,6 +48,7 @@ typedef NS_ENUM(uint64_t, VCPStreamStatus) {
     VCPStreamStatusReceiving = 2,
     VCPStreamStatusError = 3,
     VCPStreamStatusHoldingLastFrame = 4,
+    VCPStreamStatusCompleted = 5,
 };
 
 @interface VCPDashboardHeaderView : UIView
@@ -162,6 +177,10 @@ typedef NS_ENUM(uint64_t, VCPStreamStatus) {
             case VCPStreamStatusHoldingLastFrame:
                 statusText = @"● 断流保护：保持最后一帧";
                 statusColor = UIColor.systemOrangeColor;
+                break;
+            case VCPStreamStatusCompleted:
+                statusText = @"● 本地媒体播放完成";
+                statusColor = UIColor.systemBlueColor;
                 break;
             default:
                 statusText = @"● 等待 SpringBoard 接管";
@@ -365,16 +384,7 @@ static NSURL *VCImportLocalMediaURL(NSURL *sourceURL,
 }
 
 static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
-    int token = -1;
-    if (notify_register_check(VCStreamStatusNotificationName, &token) != NOTIFY_STATUS_OK) {
-        return NO;
-    }
-    uint64_t status = VCPStreamStatusDisabled;
-    uint32_t result = notify_get_state(token, &status);
-    notify_cancel(token);
-    if (result != NOTIFY_STATUS_OK) return NO;
-    if (statusOut) *statusOut = status;
-    return YES;
+    return VCPGetNotifyChannelState(VCPNotifyChannelStreamStatus, statusOut);
 }
 
 static uint64_t VCPMonotonicMilliseconds(void) {
@@ -386,19 +396,34 @@ static uint64_t VCPMonotonicMilliseconds(void) {
     return (uint64_t)(nanos / 1000000.0L);
 }
 
-static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
-    if (!name || !stateOut) return NO;
-    int token = -1;
-    if (notify_register_check(name, &token) != NOTIFY_STATUS_OK) return NO;
-    uint32_t result = notify_get_state(token, stateOut);
-    notify_cancel(token);
-    return result == NOTIFY_STATUS_OK;
+static int VCPNotifyTokenForChannel(VCPNotifyChannel channel) {
+    static dispatch_once_t onceToken;
+    static int tokens[VCPNotifyChannelCount];
+    dispatch_once(&onceToken, ^{
+        for (NSUInteger index = 0; index < VCPNotifyChannelCount; index++) {
+            tokens[index] = -1;
+            int token = -1;
+            if (notify_register_check(VCPNotifyChannelNames[index], &token) ==
+                NOTIFY_STATUS_OK) {
+                tokens[index] = token;
+            }
+        }
+    });
+    return channel < VCPNotifyChannelCount ? tokens[channel] : -1;
+}
+
+static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
+                                     uint64_t *stateOut) {
+    if (!stateOut) return NO;
+    int token = VCPNotifyTokenForChannel(channel);
+    return token >= 0 && notify_get_state(token, stateOut) == NOTIFY_STATUS_OK;
 }
 
 @interface VCPRootListController : PSListController
     <NSURLSessionDataDelegate, UIDocumentPickerDelegate, PHPickerViewControllerDelegate> {
     VCJPEGParserState _streamTestJPEGParserState;
     NSUInteger _streamTestJPEGOffset;
+    uint64_t _lastPreferencesSyncMilliseconds;
 }
 @property (nonatomic, strong) NSURLSession *streamTestSession;
 @property (nonatomic, strong) NSURLSessionDataTask *streamTestTask;
@@ -424,6 +449,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 - (void)layoutDashboardHeaderIfNeeded;
 - (void)startStatusRefreshTimer;
 - (void)stopStatusRefreshTimer;
+- (void)synchronizePreferencesIfNeeded:(BOOL)force;
 - (NSArray<NSURL *> *)localMediaLibraryEntries;
 - (id)currentPackageVersion:(PSSpecifier *)specifier;
 - (id)currentNetworkEndpointSummary:(PSSpecifier *)specifier;
@@ -514,6 +540,17 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
     self.statusRefreshTimer = nil;
 }
 
+- (void)synchronizePreferencesIfNeeded:(BOOL)force {
+    uint64_t now = VCPMonotonicMilliseconds();
+    if (!force && _lastPreferencesSyncMilliseconds > 0 &&
+        now >= _lastPreferencesSyncMilliseconds &&
+        now - _lastPreferencesSyncMilliseconds < 750) {
+        return;
+    }
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    _lastPreferencesSyncMilliseconds = now;
+}
+
 - (void)refreshControlPanel:(id)sender {
     [self refreshRuntimePresentation];
     UISelectionFeedbackGenerator *feedback = [UISelectionFeedbackGenerator new];
@@ -521,12 +558,12 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (void)refreshRuntimePresentation {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:NO];
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
     uint64_t rawStatus = VCPStreamStatusDisabled;
     VCPGetSystemStreamStatus(&rawStatus);
-    VCPStreamStatus status = rawStatus <= VCPStreamStatusHoldingLastFrame
+    VCPStreamStatus status = rawStatus <= VCPStreamStatusCompleted
         ? (VCPStreamStatus)rawStatus : VCPStreamStatusDisabled;
     NSString *source = [self currentSourceConfigurationSummary:nil];
     NSString *pipeline = [self currentSystemVideoPipelineStatus:nil];
@@ -549,7 +586,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
-        CFPreferencesAppSynchronize(VCPreferencesDomain);
+        [self synchronizePreferencesIfNeeded:YES];
         id sourceValue = CFBridgingRelease(
             CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
         NSInteger sourceTypeValue = [sourceValue integerValue];
@@ -580,6 +617,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
             NSCharacterSet.whitespaceAndNewlineCharacterSet];
     }
     [super setPreferenceValue:value specifier:specifier];
+    [self synchronizePreferencesIfNeeded:YES];
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          VCPreferencesChangedNotification,
                                          NULL,
@@ -660,7 +698,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (id)currentNetworkEndpointSummary:(PSSpecifier *)specifier {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:NO];
     id value = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("streamURL"), VCPreferencesDomain));
     if (![value isKindOfClass:NSString.class] || [value length] == 0) {
@@ -681,7 +719,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (id)currentSourceConfigurationSummary:(PSSpecifier *)specifier {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:NO];
     id sourceValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
     switch ([sourceValue integerValue]) {
@@ -742,7 +780,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (id)currentLocalMediaName:(PSSpecifier *)specifier {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:NO];
     id pathValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(VCLocalMediaPathKey, VCPreferencesDomain));
     if (![pathValue isKindOfClass:NSString.class] || [pathValue length] == 0) {
@@ -781,15 +819,11 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (id)currentLocalTransformStatus:(PSSpecifier *)specifier {
-    int token = -1;
-    if (notify_register_check(VCLocalTransformStatusNotificationName, &token) !=
-        NOTIFY_STATUS_OK) {
+    uint64_t state = 0;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelLocalTransform, &state)) {
         return @"SpringBoard 状态不可用";
     }
-    uint64_t state = 0;
-    uint32_t result = notify_get_state(token, &state);
-    notify_cancel(token);
-    if (result != NOTIFY_STATUS_OK || !(state & 1ULL)) {
+    if (!(state & 1ULL)) {
         return @"等待启用本地媒体";
     }
     BOOL ready = (state & (1ULL << 1)) != 0;
@@ -808,15 +842,11 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (id)currentLocalVolumeHookStatus:(PSSpecifier *)specifier {
-    int token = -1;
-    if (notify_register_check(VCLocalVolumeHookStatusNotificationName, &token) !=
-        NOTIFY_STATUS_OK) {
+    uint64_t state = 0;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelLocalVolumeHook, &state)) {
         return @"SpringBoard 状态不可用";
     }
-    uint64_t state = 0;
-    uint32_t result = notify_get_state(token, &state);
-    notify_cancel(token);
-    if (result != NOTIFY_STATUS_OK || !(state & 1ULL)) return @"未安装，保留系统音量";
+    if (!(state & 1ULL)) return @"未安装，保留系统音量";
     BOOL buttons = (state & (1ULL << 1)) != 0;
     BOOL delta = (state & (1ULL << 2)) != 0;
     if (buttons && delta) return @"已安装：按键 + 增量双路径";
@@ -824,7 +854,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (id)currentSourceRuntimeStatus:(PSSpecifier *)specifier {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:NO];
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
     if (![enabledValue boolValue]) return @"已停用";
@@ -835,17 +865,18 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
         case VCPStreamStatusReceiving: return @"正在稳定产帧";
         case VCPStreamStatusError: return @"来源错误，正在恢复";
         case VCPStreamStatusHoldingLastFrame: return @"断流，保持最后一帧";
+        case VCPStreamStatusCompleted: return @"本地媒体播放完成";
         default: return @"等待 SpringBoard 接管";
     }
 }
 
 - (id)currentSystemVideoPipelineStatus:(PSSpecifier *)specifier {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:NO];
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
     if (![enabledValue boolValue]) return @"已停用";
     uint64_t timestamp = 0;
-    if (!VCPGetNotifyState(VCVideoPipelineHeartbeatNotificationName, &timestamp) ||
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelVideoPipeline, &timestamp) ||
         timestamp == 0) {
         return @"等待相机应用调用";
     }
@@ -876,7 +907,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (void)showCurrentSourceGuide:(PSSpecifier *)specifier {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:YES];
     id sourceValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
     NSString *title = @"网络流使用顺序";
@@ -937,7 +968,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 }
 
 - (void)copyRuntimeDiagnostics:(PSSpecifier *)specifier {
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:YES];
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
     id holdValue = CFBridgingRelease(
@@ -1271,7 +1302,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
 
 - (void)testStreamConnection:(PSSpecifier *)specifier {
     if (self.streamTestTask) return;
-    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    [self synchronizePreferencesIfNeeded:YES];
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
     id sourceTypeValue = CFBridgingRelease(

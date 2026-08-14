@@ -167,14 +167,17 @@ typedef void (*VCRenderDisplayFunction)(uint32_t contextID,
     BOOL schedule = NO;
     os_unfair_lock_lock(&_lock);
     if (force) _geometryRefreshCountdown = 0;
-    if (!_geometryRefreshPending &&
-        (_screenWidth == 0 || _screenHeight == 0 ||
-         _geometryRefreshCountdown == 0)) {
-        _geometryRefreshPending = YES;
-        _geometryRefreshCountdown = (NSUInteger)MAX(1, self.preferredFPS / 4);
-        schedule = YES;
-    } else if (_geometryRefreshCountdown > 0) {
-        _geometryRefreshCountdown--;
+    if (!_geometryRefreshPending) {
+        if (_geometryRefreshCountdown == 0) {
+            _geometryRefreshPending = YES;
+            // Missing geometry uses the same bounded retry interval as normal
+            // rotation polling. A transient UIKit failure must not turn into
+            // one main-queue query for every 60 FPS capture callback.
+            _geometryRefreshCountdown = (NSUInteger)MAX(1, self.preferredFPS / 4);
+            schedule = YES;
+        } else {
+            _geometryRefreshCountdown--;
+        }
     }
     os_unfair_lock_unlock(&_lock);
     if (!schedule) return;

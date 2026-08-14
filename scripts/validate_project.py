@@ -213,9 +213,14 @@ def validate_preferences() -> None:
             "copyRuntimeDiagnostics:",
             "UIPasteboard.generalPasteboard.string",
             "showCurrentSourceGuide:",
+            "VCPNotifyTokenForChannel",
+            "synchronizePreferencesIfNeeded:",
+            "VCPStreamStatusCompleted",
         ),
         "mobile source dashboard and runtime recovery",
     )
+    if "notify_cancel(" in controller or controller.count("notify_register_check(") != 1:
+        fail("settings live polling must reuse process-lifetime Darwin notify tokens")
     require(
         bundle_makefile,
         ("AVFoundation", "PhotosUI", "QuartzCore"),
@@ -342,6 +347,8 @@ def validate_zero_copy_bus() -> None:
             "if (!self.renderDisplay)",
             "requestScreenGeometryRefreshIfNeeded",
             "_geometryRefreshPending",
+            "_geometryRefreshCountdown == 0",
+            "transient UIKit failure",
         ),
         "screen producer",
     )
@@ -364,6 +371,8 @@ def validate_zero_copy_bus() -> None:
             "videoTrack.preferredTransform",
             "trackRotation",
             "trackMirrored",
+            "VCLocalMediaCompletionCallback",
+            "reachedNaturalEnd",
         ),
         "local media producer",
     )
@@ -386,9 +395,16 @@ def validate_zero_copy_bus() -> None:
             "publishInterleavedStereoSamples",
             "_pendingPixelBuffer",
             "_frameProcessingScheduled",
+            "sourceGenerationIsCurrent:",
+            "sourceGeneration:sourceGeneration",
+            "VCStreamStatusCompleted",
+            "[[VCSharedAudioServer sharedServer] invalidate]",
+            "_configuredHoldLastFrame",
         ),
         "single-producer coordinator",
     )
+    if "producerFailedWithError:error];" in coordinator:
+        fail("producer errors must be generation-gated after a source switch")
     if "initWithURL:" in coordinator.split("if (!_producerProcess) return;", 1)[0]:
         fail("a consumer path can still instantiate a network decoder")
     require(
