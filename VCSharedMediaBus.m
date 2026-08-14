@@ -12,6 +12,10 @@ typedef NS_ENUM(NSUInteger, VCNotifyChannel) {
     VCNotifyChannelAudioSurface,
     VCNotifyChannelVideoPipelineHeartbeat,
     VCNotifyChannelAudioPipelineHeartbeat,
+    VCNotifyChannelSpringBoardRuntimeHeartbeat,
+    VCNotifyChannelMediaServerRuntimeHeartbeat,
+    VCNotifyChannelMediaServerVideoRuntime,
+    VCNotifyChannelApplicationVideoRuntime,
     VCNotifyChannelCount,
 };
 
@@ -24,6 +28,14 @@ static const char *VCNotifyChannelNames[VCNotifyChannelCount] = {
         "com.murkaska.virtualcampro/pipeline.video.heartbeat.v1",
     [VCNotifyChannelAudioPipelineHeartbeat] =
         "com.murkaska.virtualcampro/pipeline.audio.heartbeat.v1",
+    [VCNotifyChannelSpringBoardRuntimeHeartbeat] =
+        "com.murkaska.virtualcampro/runtime.springboard.heartbeat.v1",
+    [VCNotifyChannelMediaServerRuntimeHeartbeat] =
+        "com.murkaska.virtualcampro/runtime.mediaserverd.heartbeat.v1",
+    [VCNotifyChannelMediaServerVideoRuntime] =
+        "com.murkaska.virtualcampro/runtime.mediaserverd.video.v1",
+    [VCNotifyChannelApplicationVideoRuntime] =
+        "com.murkaska.virtualcampro/runtime.application.video.v1",
 };
 
 typedef struct {
@@ -120,6 +132,114 @@ static BOOL VCNotifyStateIsRecent(VCNotifyChannel timestampChannel,
     if (now < timestamp) return NO;
     uint64_t maximumAgeMilliseconds = (uint64_t)(MAX(0.05, maximumAge) * 1000.0);
     return now - timestamp <= maximumAgeMilliseconds;
+}
+
+void VCStartSharedRuntimeHeartbeat(VCSharedRuntimeProcess process) {
+    static dispatch_source_t heartbeatTimers[3];
+    static os_unfair_lock heartbeatLock = OS_UNFAIR_LOCK_INIT;
+    VCNotifyChannel channel = VCNotifyChannelCount;
+    switch (process) {
+        case VCSharedRuntimeProcessSpringBoard:
+            channel = VCNotifyChannelSpringBoardRuntimeHeartbeat;
+            break;
+        case VCSharedRuntimeProcessMediaServer:
+            channel = VCNotifyChannelMediaServerRuntimeHeartbeat;
+            break;
+        default:
+            return;
+    }
+
+    os_unfair_lock_lock(&heartbeatLock);
+    if (heartbeatTimers[process]) {
+        os_unfair_lock_unlock(&heartbeatLock);
+        return;
+    }
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER,
+        0,
+        0,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (!timer) {
+        os_unfair_lock_unlock(&heartbeatLock);
+        return;
+    }
+    heartbeatTimers[process] = timer;
+    os_unfair_lock_unlock(&heartbeatLock);
+
+    VCNotifyWriteState(channel, VCMonotonicMilliseconds(), NO);
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW,
+                                            (int64_t)(2.0 * NSEC_PER_SEC)),
+                              (uint64_t)(2.0 * NSEC_PER_SEC),
+                              (uint64_t)(0.25 * NSEC_PER_SEC));
+    dispatch_source_set_event_handler(timer, ^{
+        VCNotifyWriteState(channel, VCMonotonicMilliseconds(), NO);
+    });
+    dispatch_resume(timer);
+}
+
+static BOOL VCRuntimeEventNeedsImmediateTransition(VCNotifyChannel channel,
+                                                   uint8_t event) {
+    if (channel == VCNotifyChannelMediaServerVideoRuntime) {
+        return event >= VCMediaServerVideoRuntimeInjected &&
+            event <= VCMediaServerVideoRuntimeHookCapacityExceeded;
+    }
+    if (channel == VCNotifyChannelApplicationVideoRuntime) {
+        return event == VCApplicationVideoRuntimeDelegateWrapped ||
+            event == VCApplicationVideoRuntimePreviewOverlayInstalled ||
+            event == VCApplicationVideoRuntimePhotoReplacementSucceeded ||
+            event == VCApplicationVideoRuntimePhotoReplacementFailed;
+    }
+    return NO;
+}
+
+static void VCReportRuntimeEvent(VCNotifyChannel channel,
+                                 uint8_t event,
+                                 uint8_t detail,
+                                 _Atomic(uint64_t) *lastRuntimeState) {
+    uint64_t now = VCMonotonicMilliseconds();
+    uint64_t next = VCPackRuntimeEventState(event, detail, now);
+    uint64_t observed = atomic_load_explicit(lastRuntimeState,
+                                              memory_order_relaxed);
+    do {
+        uint8_t previousEvent = (uint8_t)VCEventFromRuntimeState(observed);
+        uint8_t previousDetail = VCDetailFromRuntimeState(observed);
+        uint64_t previousTimestamp = VCTimestampFromRuntimeState(observed);
+        if (now >= previousTimestamp) {
+            BOOL sameEvent = previousEvent == event && previousDetail == detail;
+            uint64_t minimumInterval = sameEvent
+                ? 1000
+                : (VCRuntimeEventNeedsImmediateTransition(channel, event)
+                    ? 0
+                    : 250);
+            if (now - previousTimestamp < minimumInterval) return;
+        }
+    } while (!atomic_compare_exchange_weak_explicit(lastRuntimeState,
+                                                     &observed,
+                                                     next,
+                                                     memory_order_relaxed,
+                                                     memory_order_relaxed));
+    VCNotifyWriteState(channel, next, NO);
+}
+
+void VCReportMediaServerVideoRuntimeEvent(
+    VCMediaServerVideoRuntimeEvent event,
+    uint8_t detail) {
+    static _Atomic(uint64_t) lastRuntimeState = 0;
+    VCReportRuntimeEvent(VCNotifyChannelMediaServerVideoRuntime,
+                         (uint8_t)event,
+                         detail,
+                         &lastRuntimeState);
+}
+
+void VCReportApplicationVideoRuntimeEvent(
+    VCApplicationVideoRuntimeEvent event,
+    uint8_t detail) {
+    static _Atomic(uint64_t) lastRuntimeState = 0;
+    VCReportRuntimeEvent(VCNotifyChannelApplicationVideoRuntime,
+                         (uint8_t)event,
+                         detail,
+                         &lastRuntimeState);
 }
 
 @interface VCSharedVideoServer () {

@@ -1,12 +1,18 @@
 #import <Foundation/Foundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import "VCSharedMediaProtocol.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSUInteger, VCSharedMediaKind) {
     VCSharedMediaKindVideo = 1,
     VCSharedMediaKindAudio = 2,
+};
+
+typedef NS_ENUM(NSUInteger, VCSharedRuntimeProcess) {
+    VCSharedRuntimeProcessSpringBoard = 1,
+    VCSharedRuntimeProcessMediaServer = 2,
 };
 
 /// SpringBoard-side publisher. Frames stay IOSurface-backed and are never
@@ -64,5 +70,23 @@ FOUNDATION_EXPORT void VCReleaseSharedVideoPixelBuffer(
 FOUNDATION_EXPORT void VCMarkSystemPipelineActivity(VCSharedMediaKind kind);
 FOUNDATION_EXPORT BOOL VCSystemPipelineIsActive(VCSharedMediaKind kind,
                                                 NSTimeInterval maximumAge);
+
+/// Process-lifetime liveness signals make stale notify state distinguishable
+/// from a currently loaded SpringBoard/mediaserverd runtime. Heartbeats update
+/// at a low fixed cadence and never participate in replacement correctness.
+FOUNDATION_EXPORT void VCStartSharedRuntimeHeartbeat(
+    VCSharedRuntimeProcess process);
+
+/// Records the most recent mediaserverd video stage without relying on unified
+/// logging. Repeated hot-path events are rate limited inside the implementation.
+FOUNDATION_EXPORT void VCReportMediaServerVideoRuntimeEvent(
+    VCMediaServerVideoRuntimeEvent event,
+    uint8_t detail);
+
+/// Persists the latest application-side compatibility stage so diagnostics
+/// survive switching from Camera back to Settings.
+FOUNDATION_EXPORT void VCReportApplicationVideoRuntimeEvent(
+    VCApplicationVideoRuntimeEvent event,
+    uint8_t detail);
 
 NS_ASSUME_NONNULL_END

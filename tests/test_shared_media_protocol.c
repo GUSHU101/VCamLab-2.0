@@ -17,6 +17,36 @@ static void testPipelineHeartbeatRateLimit(void) {
     assert(VCShouldPublishPipelineHeartbeat(999, 1000));
 }
 
+static void testRuntimeEventStateRoundTrip(void) {
+    uint64_t timestamp = UINT64_C(0x0000123456789abc);
+    uint64_t state = VCPackRuntimeEventState(
+        VCMediaServerVideoRuntimeSourceUnavailable,
+        37,
+        timestamp);
+    assert(VCEventFromRuntimeState(state) ==
+        VCMediaServerVideoRuntimeSourceUnavailable);
+    assert(VCDetailFromRuntimeState(state) == 37);
+    assert(VCTimestampFromRuntimeState(state) == timestamp);
+
+    state = VCPackRuntimeEventState(
+        VCMediaServerVideoRuntimeReplacementSucceeded,
+        UINT8_MAX,
+        UINT64_MAX);
+    assert(VCEventFromRuntimeState(state) ==
+        VCMediaServerVideoRuntimeReplacementSucceeded);
+    assert(VCDetailFromRuntimeState(state) == UINT8_MAX);
+    assert(VCTimestampFromRuntimeState(state) ==
+        VC_RUNTIME_EVENT_TIMESTAMP_MASK);
+
+    state = VCPackRuntimeEventState(
+        VCApplicationVideoRuntimePreviewFrameDisplayed,
+        0,
+        42);
+    assert(VCEventFromRuntimeState(state) ==
+        VCApplicationVideoRuntimePreviewFrameDisplayed);
+    assert(VCTimestampFromRuntimeState(state) == 42);
+}
+
 static void testSharedTimestampFreshness(void) {
     assert(VCSharedTimestampIsRecent(5000, 4900, 100));
     assert(!VCSharedTimestampIsRecent(5001, 4900, 100));
@@ -99,6 +129,7 @@ static void testStreamingResampleContinuity(void) {
 int main(void) {
     testSurfaceStateRoundTrip();
     testPipelineHeartbeatRateLimit();
+    testRuntimeEventStateRoundTrip();
     testSharedTimestampFreshness();
     testVideoControlAtomicLayout();
     testAudioRingWrap();

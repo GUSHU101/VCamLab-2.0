@@ -244,6 +244,12 @@
             <key>vcLiveStatus</key><true/>
         </dict>
         <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>应用回退管线</string>
+            <key>get</key><string>currentApplicationFallbackStatus:</string>
+            <key>vcLiveStatus</key><true/>
+        </dict>
+        <dict>
             <key>cell</key><string>PSButtonCell</string>
             <key>label</key><string>重载当前来源</string>
             <key>action</key><string>reloadCurrentSource:</string>

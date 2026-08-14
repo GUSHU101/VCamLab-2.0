@@ -33,6 +33,17 @@ ls -la /var/jb/Library/PreferenceLoader/Preferences/VirtualCamPro.plist
 
 确认 PreferenceLoader 已安装，然后重启“设置”应用或执行一次 userspace reboot。
 
+## 完全不能替换，而且系统日志为空
+
+先确认安装版本为 2.23.0 或更高。该版本不再依赖 unified log 才能判断注入链路：先打开目标相机应用 10 秒，再切回“设置 → VirtualCamPro → 复制运行诊断信息”。重点查看：
+
+- `springBoardRuntime`：无存活信号表示生产者插件未注入；旧的“正在稳定产帧”会被忽略，不再当作当前有效状态。
+- `mediaServerRuntime`：无存活信号表示 `VCMediaServer.dylib` 没有进入 mediaserverd，优先检查安装路径、filter plist 和注入框架。
+- `mediaServerVideoStage`：可直接区分找不到 `BWNodeOutput`、签名不兼容、Hook 已安装、共享来源不可见、格式不支持、转换失败和替换成功。
+- `applicationVideoStage`：记录相机应用是否真正进入 AVFoundation Hook、delegate 是否接管、预览是否显示替换帧以及照片替换结果；切回设置后仍保留最后阶段和发生时间。
+
+若 `mediaServerRuntime` 存活且阶段停在“Hook 已安装”，但打开相机后始终没有“共享来源不可见/转换失败/替换成功”，说明该相机模式没有经过当前识别的 `BWNodeOutput emitSampleBuffer:` 入口；2.23.0 会持续低频重扫，但仍需把完整诊断发回用于扩展真机入口。若应用阶段显示“预览已显示替换帧”而实际界面没有变化，则问题位于目标应用的图层合成顺序，而不是解码或共享帧。
+
 ## 点击 VirtualCamPro 后设置闪退
 
 先确认安装的是 2.22.0 或更高版本。该版本不再在页面加载阶段安装自定义 table header，也不为设置面板单独链接 QuartzCore；动态状态只在导航转场结束后使用 iOS 15 兼容的一参数 selector 刷新。可选刷新异常会自动停表，原生开关和来源配置仍应可用。

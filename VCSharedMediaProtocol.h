@@ -20,6 +20,38 @@
 #define VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY \
     "com.murkaska.virtualcampro.system-replacement.v1"
 #define VC_PIPELINE_HEARTBEAT_MIN_INTERVAL_MS 250u
+#define VC_RUNTIME_HEARTBEAT_MAX_AGE_MS 6000u
+#define VC_RUNTIME_EVENT_TIMESTAMP_MASK UINT64_C(0x0000ffffffffffff)
+
+typedef enum {
+    VCMediaServerVideoRuntimeUnknown = 0,
+    VCMediaServerVideoRuntimeInjected = 1,
+    VCMediaServerVideoRuntimeScanning = 2,
+    VCMediaServerVideoRuntimeHookInstalled = 3,
+    VCMediaServerVideoRuntimeNodeClassUnavailable = 4,
+    VCMediaServerVideoRuntimeIncompatibleSignature = 5,
+    VCMediaServerVideoRuntimeHookCapacityExceeded = 6,
+    VCMediaServerVideoRuntimeSampleObserved = 7,
+    VCMediaServerVideoRuntimeSourceUnavailable = 8,
+    VCMediaServerVideoRuntimeUnsupportedPixelFormat = 9,
+    VCMediaServerVideoRuntimeConversionFailed = 10,
+    VCMediaServerVideoRuntimeReplacementSucceeded = 11,
+} VCMediaServerVideoRuntimeEvent;
+
+typedef enum {
+    VCApplicationVideoRuntimeUnknown = 0,
+    VCApplicationVideoRuntimeInjected = 1,
+    VCApplicationVideoRuntimeDelegateWrapped = 2,
+    VCApplicationVideoRuntimeSystemReplacementObserved = 3,
+    VCApplicationVideoRuntimeSourceUnavailable = 4,
+    VCApplicationVideoRuntimeConversionFailed = 5,
+    VCApplicationVideoRuntimeReplacementSucceeded = 6,
+    VCApplicationVideoRuntimePreviewOverlayInstalled = 7,
+    VCApplicationVideoRuntimePreviewSourceUnavailable = 8,
+    VCApplicationVideoRuntimePreviewFrameDisplayed = 9,
+    VCApplicationVideoRuntimePhotoReplacementSucceeded = 10,
+    VCApplicationVideoRuntimePhotoReplacementFailed = 11,
+} VCApplicationVideoRuntimeEvent;
 
 typedef struct {
     uint32_t magic;
@@ -38,6 +70,31 @@ static inline uint32_t VCGenerationFromSurfaceState(uint64_t state) {
 
 static inline uint32_t VCSurfaceIDFromState(uint64_t state) {
     return (uint32_t)(state & UINT32_MAX);
+}
+
+/// Runtime telemetry reserves the low 48 bits for monotonic milliseconds and
+/// the high bytes for a stable event code plus one bounded detail value. The
+/// timestamp horizon is thousands of years and the layout stays safe for
+/// notify(3)'s single uint64_t state slot.
+static inline uint64_t VCPackRuntimeEventState(
+    uint8_t event,
+    uint8_t detail,
+    uint64_t timestampMilliseconds) {
+    return ((uint64_t)((uint8_t)event) << 56) |
+        ((uint64_t)detail << 48) |
+        (timestampMilliseconds & VC_RUNTIME_EVENT_TIMESTAMP_MASK);
+}
+
+static inline uint8_t VCEventFromRuntimeState(uint64_t state) {
+    return (uint8_t)((state >> 56) & UINT8_MAX);
+}
+
+static inline uint8_t VCDetailFromRuntimeState(uint64_t state) {
+    return (uint8_t)((state >> 48) & UINT8_MAX);
+}
+
+static inline uint64_t VCTimestampFromRuntimeState(uint64_t state) {
+    return state & VC_RUNTIME_EVENT_TIMESTAMP_MASK;
 }
 
 /// Pipeline heartbeats are diagnostics, not an application-fallback gate. A

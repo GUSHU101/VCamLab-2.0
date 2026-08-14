@@ -23,12 +23,13 @@
 - 用一个需要较长时间读取元数据的本地 MOV 连续执行“选择、开始、停止、切到下一段”100 次：停止后的旧轨道/方向加载必须在约 100 ms 检查周期内退出，不能迟到报错、覆盖新来源或继续增长 AVFoundation I/O；同一视频循环 100 次只应在首次播放前加载一次轨道、`preferredTransform` 与 `naturalSize`，每轮方向和输出尺寸保持一致。
 - 让 HLS 主清单先就绪、视频轨道元数据延迟返回，再快速断流重连或切换 URL 100 次：SpringBoard 主线程不得因枚举 `AVPlayerItem` 轨道或读取 nominal FPS 卡顿；旧 `AVPlayerItem` 的迟到回调不得修改新计时器，停止时应取消未完成的 asset loading，未取得 FPS 时保持安全的初始轮询频率。
 - 在网络 URL 文本框持续编辑 30 秒并拖动本地 FPS/JPEG 滑块：每秒状态刷新只能更新带 `vcLiveStatus` 的只读行，键盘、光标、输入内容和滑块手势不得被打断；退出该设置页后不得继续产生一秒定时刷新。
-- 保持设置页可见 30 分钟并用 Instruments/System Trace 观察：四个状态通道只在页面进程首次读取时注册，后续每秒刷新不得反复出现 `notify_register_check`/`notify_cancel`；同一刷新周期不得为每个状态行重复执行偏好域同步。
+- 保持设置页可见 30 分钟并用 Instruments/System Trace 观察：全部状态通道只在页面进程首次读取时注册，后续每秒刷新不得反复出现 `notify_register_check`/`notify_cancel`；同一刷新周期不得为每个状态行重复执行偏好域同步。mediaserverd 与应用热路径的相同阶段最多每秒写一次，快速阶段切换最多每 250 ms 写一次。
 - 依次选择网络、屏幕和本地来源，确认页面只展示对应配置组且“当前配置/操作指引”同步变化。无 URL、本地文件未选择或已被外部删除时，原生“当前配置”行必须明确提示先修复配置。
 - 本地媒体库行应显示导入文件总数和容量；查看列表时当前文件带实心标记，超过 15 项时有折叠提示，操作本身不得删除文件。复制运行诊断后检查文本不包含网络 URL query/fragment 或访问令牌。
 - 将来源设为“网络 HLS / MJPEG”，填写可持续输出的地址，再启用画面替换；随后分别测试屏幕镜像、本地视频和纯 MP3。
 - 完全退出相机相关应用后重新打开。
-- 日志出现 `mediaserverd BWNodeOutput hooks installed` 且 class 数量至少为 1；收到来源后只记录一次 `SpringBoard published first shared frame`，且尺寸符合来源与旋转设置。
+- 2.23.0 无日志诊断中 `springBoardRuntime` 与 `mediaServerRuntime` 均必须存活，`mediaServerVideoStage` 必须显示 Hook 至少安装到 1 个类；打开相机后阶段必须推进到共享来源不可见、格式/转换失败或替换成功之一，不能永久停在扫描状态。
+- 强制让 `BWNodeOutput` 从父类继承 `emitSampleBuffer:` 的测试构建仍必须安装 Hook；让相机私有类在启动快速重试窗口之后才注册时，低频持续扫描必须最终接管，无需重启 mediaserverd。
 - 同时运行两个独立 CaptureSession（优先 Camera + Safari/WebKit `getUserMedia`）：反复启动/停止其中一个 50 次，另一个必须持续显示替换帧。任何单一节点成功都不得导致另一路真实帧穿透；这项专门验证逐样本证据替代全局 heartbeat 门控。
 - 关闭画面替换时，以下所有模式必须保持真实相机原有行为，作为对照基线。
 - 网络源使用带方向标记和左右文字的画面，在手机上改变本地旋转/镜像/FPS/质量设置，网络输出必须完全不变；方向只能随 OBS/Windows 端调整。

@@ -13,6 +13,7 @@
 #import "../VCJPEGParser.h"
 #import "../VCMediaTrackLoader.h"
 #import "../VCPreferenceValidation.h"
+#import "../VCSharedMediaProtocol.h"
 
 static CFStringRef const VCPreferencesChangedNotification = CFSTR("com.murkaska.virtualcampro/preferences.changed");
 static CFStringRef const VCPreferencesDomain = CFSTR("com.murkaska.virtualcampro");
@@ -28,6 +29,10 @@ typedef NS_ENUM(NSUInteger, VCPNotifyChannel) {
     VCPNotifyChannelLocalTransform,
     VCPNotifyChannelLocalVolumeHook,
     VCPNotifyChannelVideoPipeline,
+    VCPNotifyChannelSpringBoardRuntime,
+    VCPNotifyChannelMediaServerRuntime,
+    VCPNotifyChannelMediaServerVideoRuntime,
+    VCPNotifyChannelApplicationVideoRuntime,
     VCPNotifyChannelCount,
 };
 
@@ -40,10 +45,141 @@ static const char *VCPNotifyChannelNames[VCPNotifyChannelCount] = {
         "com.murkaska.virtualcampro/local-volume-hook.status",
     [VCPNotifyChannelVideoPipeline] =
         "com.murkaska.virtualcampro/pipeline.video.heartbeat.v1",
+    [VCPNotifyChannelSpringBoardRuntime] =
+        "com.murkaska.virtualcampro/runtime.springboard.heartbeat.v1",
+    [VCPNotifyChannelMediaServerRuntime] =
+        "com.murkaska.virtualcampro/runtime.mediaserverd.heartbeat.v1",
+    [VCPNotifyChannelMediaServerVideoRuntime] =
+        "com.murkaska.virtualcampro/runtime.mediaserverd.video.v1",
+    [VCPNotifyChannelApplicationVideoRuntime] =
+        "com.murkaska.virtualcampro/runtime.application.video.v1",
 };
 
 static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
                                      uint64_t *stateOut);
+static uint64_t VCPMonotonicMilliseconds(void);
+
+static BOOL VCPRuntimeTimestampAge(uint64_t timestamp,
+                                   uint64_t *ageMillisecondsOut) {
+    if (ageMillisecondsOut) *ageMillisecondsOut = UINT64_MAX;
+    if (timestamp == 0) return NO;
+    uint64_t now = VCPMonotonicMilliseconds();
+    if (now < timestamp) return NO;
+    if (ageMillisecondsOut) *ageMillisecondsOut = now - timestamp;
+    return YES;
+}
+
+static NSString *VCPRuntimeHeartbeatDescription(VCPNotifyChannel channel,
+                                                 NSString *processName) {
+    uint64_t timestamp = 0;
+    uint64_t age = UINT64_MAX;
+    if (!VCPGetNotifyChannelState(channel, &timestamp) ||
+        !VCPRuntimeTimestampAge(timestamp, &age)) {
+        return [NSString stringWithFormat:@"%@ 未注入 / 无存活信号", processName];
+    }
+    if (age > VC_RUNTIME_HEARTBEAT_MAX_AGE_MS) {
+        return [NSString stringWithFormat:@"%@ 已失联（旧状态 %@ ms）",
+                                          processName, @(age)];
+    }
+    return [NSString stringWithFormat:@"%@ 存活（%@ ms）", processName, @(age)];
+}
+
+static NSString *VCPMediaServerVideoRuntimeDescription(uint64_t state) {
+    VCMediaServerVideoRuntimeEvent event =
+        (VCMediaServerVideoRuntimeEvent)VCEventFromRuntimeState(state);
+    uint8_t detail = VCDetailFromRuntimeState(state);
+    uint64_t timestamp = VCTimestampFromRuntimeState(state);
+    uint64_t age = UINT64_MAX;
+    NSString *ageText = VCPRuntimeTimestampAge(timestamp, &age)
+        ? [NSString stringWithFormat:@"%@ ms 前", @(age)]
+        : @"时间不可用";
+    switch (event) {
+        case VCMediaServerVideoRuntimeInjected:
+            return [NSString stringWithFormat:@"已注入，等待扫描（%@）", ageText];
+        case VCMediaServerVideoRuntimeScanning:
+            return [NSString stringWithFormat:@"正在扫描，相邻重试 %@（%@）",
+                                              @(detail), ageText];
+        case VCMediaServerVideoRuntimeHookInstalled:
+            return [NSString stringWithFormat:@"Hook 已安装：%@ 个类（%@）",
+                                              @(detail), ageText];
+        case VCMediaServerVideoRuntimeNodeClassUnavailable:
+            return [NSString stringWithFormat:@"未找到 BWNodeOutput（%@）", ageText];
+        case VCMediaServerVideoRuntimeIncompatibleSignature:
+            return [NSString stringWithFormat:@"emitSampleBuffer: 签名不兼容（%@）",
+                                              ageText];
+        case VCMediaServerVideoRuntimeHookCapacityExceeded:
+            return [NSString stringWithFormat:@"Hook 数量超过安全上限（%@）", ageText];
+        case VCMediaServerVideoRuntimeSampleObserved:
+            return [NSString stringWithFormat:@"已收到系统相机视频样本（%@）", ageText];
+        case VCMediaServerVideoRuntimeSourceUnavailable:
+            return [NSString stringWithFormat:@"相机样本已到达，但共享来源不可见（%@）",
+                                              ageText];
+        case VCMediaServerVideoRuntimeUnsupportedPixelFormat:
+            return [NSString stringWithFormat:@"相机像素格式暂不支持（%@）", ageText];
+        case VCMediaServerVideoRuntimeConversionFailed:
+            return [NSString stringWithFormat:@"替换帧转换失败（%@）", ageText];
+        case VCMediaServerVideoRuntimeReplacementSucceeded:
+            return [NSString stringWithFormat:@"最近一次系统替换成功（%@）", ageText];
+        default:
+            return @"尚无 mediaserverd 视频阶段数据";
+    }
+}
+
+static NSString *VCPCurrentMediaServerVideoRuntimeDescription(void) {
+    uint64_t runtimeState = 0;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelMediaServerVideoRuntime,
+                                  &runtimeState)) {
+        return @"状态读取失败";
+    }
+    NSString *stage = VCPMediaServerVideoRuntimeDescription(runtimeState);
+    uint64_t heartbeat = 0;
+    uint64_t heartbeatAge = UINT64_MAX;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelMediaServerRuntime,
+                                  &heartbeat) ||
+        !VCPRuntimeTimestampAge(heartbeat, &heartbeatAge) ||
+        heartbeatAge > VC_RUNTIME_HEARTBEAT_MAX_AGE_MS) {
+        return [NSString stringWithFormat:@"历史状态，当前进程无存活信号：%@",
+                                          stage];
+    }
+    return stage;
+}
+
+static NSString *VCPApplicationVideoRuntimeDescription(uint64_t state) {
+    VCApplicationVideoRuntimeEvent event =
+        (VCApplicationVideoRuntimeEvent)VCEventFromRuntimeState(state);
+    uint64_t age = UINT64_MAX;
+    NSString *ageText = VCPRuntimeTimestampAge(VCTimestampFromRuntimeState(state),
+                                               &age)
+        ? [NSString stringWithFormat:@"%@ ms 前", @(age)]
+        : @"时间不可用";
+    switch (event) {
+        case VCApplicationVideoRuntimeInjected:
+            return [NSString stringWithFormat:@"应用插件已加载（%@）", ageText];
+        case VCApplicationVideoRuntimeDelegateWrapped:
+            return [NSString stringWithFormat:@"视频输出代理已接管（%@）", ageText];
+        case VCApplicationVideoRuntimeSystemReplacementObserved:
+            return [NSString stringWithFormat:@"应用已收到系统替换样本（%@）", ageText];
+        case VCApplicationVideoRuntimeSourceUnavailable:
+            return [NSString stringWithFormat:@"视频回调已到达，但共享来源不可见（%@）",
+                                              ageText];
+        case VCApplicationVideoRuntimeConversionFailed:
+            return [NSString stringWithFormat:@"应用内视频转换失败（%@）", ageText];
+        case VCApplicationVideoRuntimeReplacementSucceeded:
+            return [NSString stringWithFormat:@"应用内视频样本替换成功（%@）", ageText];
+        case VCApplicationVideoRuntimePreviewOverlayInstalled:
+            return [NSString stringWithFormat:@"预览替换层已安装（%@）", ageText];
+        case VCApplicationVideoRuntimePreviewSourceUnavailable:
+            return [NSString stringWithFormat:@"预览层运行中，但替换帧不可见（%@）", ageText];
+        case VCApplicationVideoRuntimePreviewFrameDisplayed:
+            return [NSString stringWithFormat:@"应用预览已显示替换帧（%@）", ageText];
+        case VCApplicationVideoRuntimePhotoReplacementSucceeded:
+            return [NSString stringWithFormat:@"照片数据替换成功（%@）", ageText];
+        case VCApplicationVideoRuntimePhotoReplacementFailed:
+            return [NSString stringWithFormat:@"照片替换失败，已保留原照片（%@）", ageText];
+        default:
+            return @"尚无应用内 AVFoundation Hook 活动；请先打开一次相机应用";
+    }
+}
 
 typedef NS_ENUM(uint64_t, VCPStreamStatus) {
     VCPStreamStatusDisabled = 0,
@@ -592,6 +728,7 @@ static BOOL VCPRepairStoredPreferences(void) {
 - (id)currentLocalMediaLibrarySummary:(PSSpecifier *)specifier;
 - (id)currentSourceRuntimeStatus:(PSSpecifier *)specifier;
 - (id)currentSystemVideoPipelineStatus:(PSSpecifier *)specifier;
+- (id)currentApplicationFallbackStatus:(PSSpecifier *)specifier;
 - (id)currentLocalTransformStatus:(PSSpecifier *)specifier;
 - (id)currentLocalVolumeHookStatus:(PSSpecifier *)specifier;
 @end
@@ -995,6 +1132,16 @@ static BOOL VCPRepairStoredPreferences(void) {
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
     if (!VCPReadBooleanPreference(enabledValue, NO)) return @"已停用";
+    uint64_t producerHeartbeat = 0;
+    uint64_t producerAge = UINT64_MAX;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelSpringBoardRuntime,
+                                  &producerHeartbeat) ||
+        !VCPRuntimeTimestampAge(producerHeartbeat, &producerAge)) {
+        return @"SpringBoard 插件未注入 / 无存活信号";
+    }
+    if (producerAge > VC_RUNTIME_HEARTBEAT_MAX_AGE_MS) {
+        return @"SpringBoard 插件已失联，旧来源状态已忽略";
+    }
     uint64_t status = VCPStreamStatusDisabled;
     if (!VCPGetSystemStreamStatus(&status)) return @"SpringBoard 状态不可用";
     switch (status) {
@@ -1012,16 +1159,42 @@ static BOOL VCPRepairStoredPreferences(void) {
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
     if (!VCPReadBooleanPreference(enabledValue, NO)) return @"已停用";
-    uint64_t timestamp = 0;
-    if (!VCPGetNotifyChannelState(VCPNotifyChannelVideoPipeline, &timestamp) ||
-        timestamp == 0) {
-        return @"等待相机应用调用";
+    uint64_t mediaServerHeartbeat = 0;
+    uint64_t mediaServerAge = UINT64_MAX;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelMediaServerRuntime,
+                                  &mediaServerHeartbeat) ||
+        !VCPRuntimeTimestampAge(mediaServerHeartbeat, &mediaServerAge)) {
+        return @"mediaserverd 插件未注入 / 无存活信号";
     }
-    uint64_t now = VCPMonotonicMilliseconds();
-    if (now >= timestamp && now - timestamp <= 1500) {
+    if (mediaServerAge > VC_RUNTIME_HEARTBEAT_MAX_AGE_MS) {
+        return @"mediaserverd 插件已失联，旧管线状态已忽略";
+    }
+    uint64_t timestamp = 0;
+    uint64_t replacementAge = UINT64_MAX;
+    if (VCPGetNotifyChannelState(VCPNotifyChannelVideoPipeline, &timestamp) &&
+        VCPRuntimeTimestampAge(timestamp, &replacementAge) &&
+        replacementAge <= 1500) {
         return @"mediaserverd 最近已替换视频";
     }
-    return @"当前无活跃系统视频输出";
+    uint64_t runtimeState = 0;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelMediaServerVideoRuntime,
+                                  &runtimeState) || runtimeState == 0) {
+        return @"mediaserverd 存活，但尚未报告 Hook 阶段";
+    }
+    return VCPMediaServerVideoRuntimeDescription(runtimeState);
+}
+
+- (id)currentApplicationFallbackStatus:(PSSpecifier *)specifier {
+    [self synchronizePreferencesIfNeeded:NO];
+    id enabledValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
+    if (!VCPReadBooleanPreference(enabledValue, NO)) return @"已停用";
+    uint64_t runtimeState = 0;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelApplicationVideoRuntime,
+                                  &runtimeState) || runtimeState == 0) {
+        return @"尚无 AVFoundation Hook 活动；请先打开一次相机应用";
+    }
+    return VCPApplicationVideoRuntimeDescription(runtimeState);
 }
 
 - (void)reloadCurrentSource:(PSSpecifier *)specifier {
@@ -1135,7 +1308,11 @@ static BOOL VCPRepairStoredPreferences(void) {
          "enabled=%@\n"
          "source=%@\n"
          "sourceStatus=%@\n"
+         "springBoardRuntime=%@\n"
+         "mediaServerRuntime=%@\n"
          "systemVideoPipeline=%@\n"
+         "mediaServerVideoStage=%@\n"
+         "applicationVideoStage=%@\n"
          "networkEndpoint=%@\n"
          "localMedia=%@\n"
          "localLibrary=%@\n"
@@ -1150,7 +1327,13 @@ static BOOL VCPRepairStoredPreferences(void) {
         enabled ? @"yes" : @"no",
         [self currentSourceConfigurationSummary:nil],
         [self currentSourceRuntimeStatus:nil],
+        VCPRuntimeHeartbeatDescription(VCPNotifyChannelSpringBoardRuntime,
+                                       @"SpringBoard"),
+        VCPRuntimeHeartbeatDescription(VCPNotifyChannelMediaServerRuntime,
+                                       @"mediaserverd"),
         [self currentSystemVideoPipelineStatus:nil],
+        VCPCurrentMediaServerVideoRuntimeDescription(),
+        [self currentApplicationFallbackStatus:nil],
         [self currentNetworkEndpointSummary:nil],
         [self currentLocalMediaName:nil],
         [self currentLocalMediaLibrarySummary:nil],

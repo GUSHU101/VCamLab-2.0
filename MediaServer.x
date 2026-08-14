@@ -44,6 +44,7 @@ static SEL VCMediaTypeIsVideoSelector = NULL;
 static SEL VCMediaTypeIsAudioSelector = NULL;
 static dispatch_once_t VCConversionFailureLogToken;
 static dispatch_once_t VCUnsupportedPixelFormatLogToken;
+static dispatch_once_t VCHookUnavailableLogToken;
 static CFStringRef const VCReplacedSampleAttachmentKey =
     CFSTR(VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY);
 static char VCAudioReplacementContextAssociationKey;
@@ -332,6 +333,9 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
         if (originalPixelBuffer && VCNodeOutputIsVideo(object)) {
             OSType originalPixelFormat = CVPixelBufferGetPixelFormatType(originalPixelBuffer);
             if (!VCIsSupportedReplacementPixelFormat(originalPixelFormat)) {
+                VCReportMediaServerVideoRuntimeEvent(
+                    VCMediaServerVideoRuntimeUnsupportedPixelFormat,
+                    0);
                 dispatch_once(&VCUnsupportedPixelFormatLogToken, ^{
                     NSLog(@"[VirtualCamPro] Preserving non-color BWNodeOutput pixel format %u",
                           (unsigned int)originalPixelFormat);
@@ -346,6 +350,9 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
             CVPixelBufferRef source = [coordinator
                 copyLatestPixelBufferWithAspectFill:&aspectFill preferredFPS:&preferredFPS];
             if (!source) {
+                VCReportMediaServerVideoRuntimeEvent(
+                    VCMediaServerVideoRuntimeSourceUnavailable,
+                    0);
                 originalEmit(object, selector, originalBuffer);
                 return;
             }
@@ -355,6 +362,9 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
                                                                            preferredFPS);
             VCReleaseSharedVideoPixelBuffer(source);
             if (!replacement) {
+                VCReportMediaServerVideoRuntimeEvent(
+                    VCMediaServerVideoRuntimeConversionFailed,
+                    0);
                 dispatch_once(&VCConversionFailureLogToken, ^{
                     NSLog(@"[VirtualCamPro] System video conversion failed for %zux%zu/%u; fail-open",
                           CVPixelBufferGetWidth(originalPixelBuffer),
@@ -378,6 +388,9 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
             originalEmit(object, selector, replacement ?: originalBuffer);
             if (replacement) {
                 VCMarkSystemPipelineActivity(VCSharedMediaKindVideo);
+                VCReportMediaServerVideoRuntimeEvent(
+                    VCMediaServerVideoRuntimeReplacementSucceeded,
+                    0);
                 CFRelease(replacement);
             }
             return;
@@ -440,17 +453,31 @@ static BOOL VCClassAlreadyHooked(Class candidate) {
     return NO;
 }
 
-static BOOL VCHookNodeOutputClass(Class candidate, SEL emitSelector) {
+static BOOL VCHookNodeOutputClass(Class candidate,
+                                  SEL emitSelector,
+                                  BOOL allowInheritedMethod) {
     if (!candidate || VCClassAlreadyHooked(candidate)) return NO;
-    Method method = VCDirectInstanceMethod(candidate, emitSelector);
+    // Some iOS 15 point releases inherit emitSampleBuffer: into BWNodeOutput
+    // instead of declaring it directly. Hook that inherited implementation at
+    // the BWNodeOutput boundary, while subclasses are still limited to direct
+    // overrides so the same inherited IMP is never wrapped repeatedly.
+    Method method = allowInheritedMethod
+        ? class_getInstanceMethod(candidate, emitSelector)
+        : VCDirectInstanceMethod(candidate, emitSelector);
     if (!method) return NO;
     if (!VCMethodAcceptsSampleBuffer(method)) {
+        VCReportMediaServerVideoRuntimeEvent(
+            VCMediaServerVideoRuntimeIncompatibleSignature,
+            0);
         NSLog(@"[VirtualCamPro] Refusing unexpected %@ emitSampleBuffer: signature",
               NSStringFromClass(candidate));
         return NO;
     }
     uint32_t slot = atomic_load_explicit(&VCNodeOutputHookCount, memory_order_relaxed);
     if (slot >= VCMaximumNodeOutputHooks) {
+        VCReportMediaServerVideoRuntimeEvent(
+            VCMediaServerVideoRuntimeHookCapacityExceeded,
+            UINT8_MAX);
         NSLog(@"[VirtualCamPro] BWNodeOutput subclass hook limit reached");
         return NO;
     }
@@ -466,15 +493,25 @@ static BOOL VCHookNodeOutputClass(Class candidate, SEL emitSelector) {
     return VCNodeOutputHooks[slot].original != NULL;
 }
 
+static void VCScheduleMediaServerHookRetry(NSUInteger attempt,
+                                           NSTimeInterval delay) {
+    if (VCMediaServerRetryScheduled) return;
+    VCMediaServerRetryScheduled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(delay * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        VCMediaServerRetryScheduled = NO;
+        VCInstallMediaServerHook(attempt);
+    });
+}
+
 static void VCInstallMediaServerHook(NSUInteger attempt) {
+    VCReportMediaServerVideoRuntimeEvent(
+        VCMediaServerVideoRuntimeScanning,
+        (uint8_t)MIN(attempt, (NSUInteger)UINT8_MAX));
     Class nodeOutputClass = objc_getClass("BWNodeOutput");
     SEL emitSelector = sel_registerName("emitSampleBuffer:");
-    Method method = nodeOutputClass ? class_getInstanceMethod(nodeOutputClass, emitSelector) : NULL;
-    if (method) {
-        if (!VCMethodAcceptsSampleBuffer(method)) {
-            NSLog(@"[VirtualCamPro] BWNodeOutput emitSampleBuffer: has an unexpected runtime signature");
-            return;
-        }
+    if (nodeOutputClass) {
         VCMediaTypeIsVideoSelector = sel_registerName("mediaTypeIsVideo");
         Method videoMethod = class_getInstanceMethod(nodeOutputClass,
                                                       VCMediaTypeIsVideoSelector);
@@ -483,10 +520,9 @@ static void VCInstallMediaServerHook(NSUInteger attempt) {
         Method audioMethod = class_getInstanceMethod(nodeOutputClass,
                                                       VCMediaTypeIsAudioSelector);
         VCMediaServerCanQueryAudioMediaType = VCMethodReturnsBoolean(audioMethod);
-        VCMediaServerRetryScheduled = NO;
         uint32_t previousCount = atomic_load_explicit(&VCNodeOutputHookCount,
                                                        memory_order_acquire);
-        VCHookNodeOutputClass(nodeOutputClass, emitSelector);
+        VCHookNodeOutputClass(nodeOutputClass, emitSelector, YES);
 
         int classCount = objc_getClassList(NULL, 0);
         if (classCount > 0) {
@@ -498,7 +534,7 @@ static void VCInstallMediaServerHook(NSUInteger attempt) {
                 Class candidate = classes[index];
                 if (candidate != nodeOutputClass &&
                     VCClassIsSubclassOfClass(candidate, nodeOutputClass)) {
-                    VCHookNodeOutputClass(candidate, emitSelector);
+                    VCHookNodeOutputClass(candidate, emitSelector, NO);
                 }
             }
             free(classes);
@@ -506,6 +542,11 @@ static void VCInstallMediaServerHook(NSUInteger attempt) {
         uint32_t installedCount = atomic_load_explicit(&VCNodeOutputHookCount,
                                                         memory_order_acquire);
         VCMediaServerHookInstalled = installedCount > 0;
+        if (VCMediaServerHookInstalled) {
+            VCReportMediaServerVideoRuntimeEvent(
+                VCMediaServerVideoRuntimeHookInstalled,
+                (uint8_t)MIN(installedCount, (uint32_t)UINT8_MAX));
+        }
         if (installedCount != previousCount) {
             NSLog(@"[VirtualCamPro] mediaserverd BWNodeOutput hooks %@ (%u classes, video %@, audio %@)",
                   VCMediaServerHookInstalled ? @"installed" : @"failed",
@@ -513,20 +554,25 @@ static void VCInstallMediaServerHook(NSUInteger attempt) {
                   VCMediaServerCanQueryVideoMediaType ? @"typed" : @"sample-classified",
                   VCMediaServerCanQueryAudioMediaType ? @"typed" : @"sample-classified");
         }
-        return;
+        if (VCMediaServerHookInstalled) return;
     }
 
     if (attempt >= 20) {
-        NSLog(@"[VirtualCamPro] BWNodeOutput emitSampleBuffer: unavailable on this iOS build");
+        VCMediaServerVideoRuntimeEvent event = nodeOutputClass
+            ? VCMediaServerVideoRuntimeIncompatibleSignature
+            : VCMediaServerVideoRuntimeNodeClassUnavailable;
+        VCReportMediaServerVideoRuntimeEvent(event, 0);
+        dispatch_once(&VCHookUnavailableLogToken, ^{
+            NSLog(@"[VirtualCamPro] BWNodeOutput has no compatible "
+                   "emitSampleBuffer: entry point yet; continuing low-frequency scans");
+        });
+        // Camera internals can register well after mediaserverd starts. Keep a
+        // low-frequency scan alive instead of making the first ten seconds a
+        // permanent success/failure boundary.
+        VCScheduleMediaServerHookRetry(attempt, 5.0);
         return;
     }
-    if (VCMediaServerRetryScheduled) return;
-    VCMediaServerRetryScheduled = YES;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        VCMediaServerRetryScheduled = NO;
-        VCInstallMediaServerHook(attempt + 1);
-    });
+    VCScheduleMediaServerHookRetry(attempt + 1, 0.5);
 }
 
 static void VCMediaServerImageDidLoad(const struct mach_header *header, intptr_t slide) {
@@ -546,6 +592,7 @@ static void VCMediaServerImageDidLoad(const struct mach_header *header, intptr_t
         NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
         if ([processName isEqualToString:@"SpringBoard"] ||
             [bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
+            VCStartSharedRuntimeHeartbeat(VCSharedRuntimeProcessSpringBoard);
             [[VCStreamCoordinator sharedCoordinator] startMonitoring];
             dispatch_async(dispatch_get_main_queue(), ^{
                 VCInstallSpringBoardVolumeHooks(0);
@@ -553,6 +600,10 @@ static void VCMediaServerImageDidLoad(const struct mach_header *header, intptr_t
             return;
         }
         if (![processName isEqualToString:@"mediaserverd"]) return;
+        VCStartSharedRuntimeHeartbeat(VCSharedRuntimeProcessMediaServer);
+        VCReportMediaServerVideoRuntimeEvent(
+            VCMediaServerVideoRuntimeInjected,
+            0);
         [[VCStreamCoordinator sharedCoordinator] startMonitoring];
         _dyld_register_func_for_add_image(VCMediaServerImageDidLoad);
         dispatch_async(dispatch_get_main_queue(), ^{

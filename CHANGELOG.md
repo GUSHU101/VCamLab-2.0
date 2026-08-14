@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.23.0 - 2026-08-15
+
+- Fixed the iOS 15.8.8 mediaserverd compatibility scan so `BWNodeOutput` can be hooked when `emitSampleBuffer:` is inherited instead of declared directly. Direct subclass overrides remain hooked once, without repeatedly wrapping the same inherited implementation.
+- Removed the ten-second permanent failure boundary for private camera-class discovery. After bounded fast startup retries, mediaserverd now continues low-frequency scans so a camera graph registered later in the process lifetime can still be attached.
+- Added process-liveness heartbeats for SpringBoard and mediaserverd, and now rejects stale producer/pipeline notify values when the corresponding injected runtime is absent or has stopped updating.
+- Added persistent, rate-limited video-stage telemetry independent of unified logging. Settings now distinguishes injection, class scanning, Hook installation, unsupported formats, missing shared frames, conversion failure and confirmed system replacement.
+- Added application fallback telemetry for real AVFoundation Hook activity, delegate wrapping, preview overlay/frame display and photo replacement. The last stage and monotonic age survive switching from Camera back to Settings and are included in copied diagnostics without being overwritten by an unrelated UIKit process merely starting.
+- Bounded all hot-path diagnostic writes to at most four transitions per second and one repeated state per second, preserving fail-open media behavior without turning diagnostics into per-frame notify traffic.
+- Extended source validation and portable protocol regression tests to enforce the new liveness/event layout, inherited-method coverage, persistent retry behavior and both system/application diagnostic paths.
+
 ## 2.22.0 - 2026-08-15
 
 - Fixed another concrete local-import false-negative path: file providers and Photos may return a temporary URL or suggested name without a usable media suffix. Settings now derives the preferred extension from the URL content type, repairs unknown temporary suffixes and links only the public iOS 15 Uniform Type Identifiers framework.

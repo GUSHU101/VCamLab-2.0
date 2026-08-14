@@ -54,22 +54,40 @@ static CIContext *VCSharedCIContext(void) {
     return context;
 }
 
-static CMSampleBufferRef VCCopyCurrentReplacement(CMSampleBufferRef original) CF_RETURNS_RETAINED {
+static CMSampleBufferRef VCCopyCurrentReplacement(
+    CMSampleBufferRef original,
+    VCApplicationVideoRuntimeEvent *runtimeEventOut) CF_RETURNS_RETAINED {
+    if (runtimeEventOut) *runtimeEventOut = VCApplicationVideoRuntimeUnknown;
     VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
     // Suppress only for evidence attached to this exact sample. A global
     // mediaserverd heartbeat cannot prove that another capture session, node
     // subclass, or output path was replaced successfully.
-    if (VCSampleWasReplacedBySystem(original)) return NULL;
+    if (VCSampleWasReplacedBySystem(original)) {
+        if (runtimeEventOut) {
+            *runtimeEventOut = VCApplicationVideoRuntimeSystemReplacementObserved;
+        }
+        return NULL;
+    }
     BOOL aspectFill = YES;
     NSInteger preferredFPS = 60;
     CVPixelBufferRef source = [coordinator copyLatestPixelBufferWithAspectFill:&aspectFill
                                                                  preferredFPS:&preferredFPS];
-    if (!source) return NULL;
+    if (!source) {
+        if (runtimeEventOut) {
+            *runtimeEventOut = VCApplicationVideoRuntimeSourceUnavailable;
+        }
+        return NULL;
+    }
     CMSampleBufferRef replacement = VCCopyReplacementSampleBuffer(original,
                                                                    source,
                                                                    aspectFill,
                                                                    preferredFPS);
     VCReleaseSharedVideoPixelBuffer(source);
+    if (runtimeEventOut) {
+        *runtimeEventOut = replacement
+            ? VCApplicationVideoRuntimeReplacementSucceeded
+            : VCApplicationVideoRuntimeConversionFailed;
+    }
     return replacement;
 }
 
@@ -143,7 +161,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
     if (![delegate respondsToSelector:_cmd]) return;
 
-    CMSampleBufferRef replacement = VCCopyCurrentReplacement(sampleBuffer);
+    VCApplicationVideoRuntimeEvent runtimeEvent =
+        VCApplicationVideoRuntimeUnknown;
+    CMSampleBufferRef replacement = VCCopyCurrentReplacement(sampleBuffer,
+                                                              &runtimeEvent);
+    if (runtimeEvent != VCApplicationVideoRuntimeUnknown) {
+        VCReportApplicationVideoRuntimeEvent(runtimeEvent, 0);
+    }
     [self recordCompatibilityPixelBuffer:
         replacement ? CMSampleBufferGetImageBuffer(replacement) : NULL];
     [delegate captureOutput:output
@@ -192,6 +216,9 @@ didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
                              proxy,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     %orig(proxy, queue);
+    VCReportApplicationVideoRuntimeEvent(
+        VCApplicationVideoRuntimeDelegateWrapped,
+        0);
 }
 
 - (id<AVCaptureVideoDataOutputSampleBufferDelegate>)sampleBufferDelegate {
@@ -352,7 +379,15 @@ static CVPixelBufferRef VCCopySessionCompatibilityPixelBuffer(
     if (displayLink.preferredFramesPerSecond != displayFPS) {
         displayLink.preferredFramesPerSecond = displayFPS;
     }
-    BOOL shouldDisplay = pixelBuffer != NULL;
+    IOSurfaceRef displaySurface = pixelBuffer
+        ? CVPixelBufferGetIOSurface(pixelBuffer)
+        : NULL;
+    BOOL shouldDisplay = displaySurface != NULL;
+    VCReportApplicationVideoRuntimeEvent(
+        shouldDisplay
+            ? VCApplicationVideoRuntimePreviewFrameDisplayed
+            : VCApplicationVideoRuntimePreviewSourceUnavailable,
+        0);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -364,13 +399,12 @@ static CVPixelBufferRef VCCopySessionCompatibilityPixelBuffer(
         ? kCAGravityResizeAspect
         : (aspectFill ? kCAGravityResizeAspectFill : kCAGravityResizeAspect);
     if (shouldDisplay) {
-        IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixelBuffer);
-        id surfaceObject = surface ? (__bridge id)surface : nil;
+        id surfaceObject = (__bridge id)displaySurface;
         if (self.displayedSurface != surfaceObject) {
             self.displayedSurface = surfaceObject;
             overlay.contents = surfaceObject;
         }
-        overlay.hidden = surface == NULL;
+        overlay.hidden = NO;
     } else {
         self.displayedSurface = nil;
         overlay.contents = nil;
@@ -435,6 +469,9 @@ static CVPixelBufferRef VCCopySessionCompatibilityPixelBuffer(
                              &VCPreviewDisplayLinkAssociationKey,
                              displayLink,
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    VCReportApplicationVideoRuntimeEvent(
+        VCApplicationVideoRuntimePreviewOverlayInstalled,
+        0);
 }
 
 %end
@@ -867,6 +904,11 @@ static NSData *VCPhotoDataByReplacingPrimaryImage(NSData *originalData,
         NSData *photoData = VCPhotoDataByReplacingPrimaryImage(originalData,
                                                                 cgImage,
                                                                 jpegQuality);
+        VCReportApplicationVideoRuntimeEvent(
+            photoData
+                ? VCApplicationVideoRuntimePhotoReplacementSucceeded
+                : VCApplicationVideoRuntimePhotoReplacementFailed,
+            0);
         if (!photoData) {
             dispatch_once(&VCPhotoMetadataFailureLogToken, ^{
                 NSLog(@"[VirtualCamPro] Replacement photo metadata could not be verified; "

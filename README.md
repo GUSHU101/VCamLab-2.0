@@ -5,7 +5,7 @@
 
 VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/麦克风插件。SpringBoard 进程只生成一份媒体流，`mediaserverd` 在 `CMCapture` 相机媒体图的 `BWNodeOutput` 处替换真实 `CMSampleBuffer`；照片、录像、视频通话、WebRTC 与扫码等下游因此读取同一份替换样本，而不是在界面上覆盖一层图片。
 
-当前版本：`2.22.0`
+当前版本：`2.23.0`
 
 > 正式 `.deb` 由 GitHub Actions 从当前提交构建并作为 `VirtualCamPro-rootless` artifact 发布；不要混用历史 2.8.0 二进制。
 
@@ -22,7 +22,8 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - HLS：URL 中包含 `.m3u8` 时使用 `AVPlayerItemVideoOutput` 解码；轮询频率按发送端 nominal FPS 自适应，不再让 30/60 FPS 流固定消耗 240 Hz 主线程轮询。
 - MJPEG：其他 HTTP/HTTPS URL 按连续 JPEG 流解析；增量校验 JPEG 段结构、直接读取 SOF 尺寸并限制单帧与接收缓冲。优先尝试实时 VideoToolbox→IOSurface NV12 解码，不支持时自动回退 ImageIO。
 - 网络流参数透传：手机不旋转、镜像、限帧、缩略或重编码网络帧，分辨率、方向、帧率和质量由 Windows/OBS 发送端决定；网络模式不发布替换音频，始终使用手机原生麦克风。
-- 运行状态与恢复：设置页直接显示 SpringBoard 来源产帧状态和最近的 mediaserverd 系统视频接管状态，并可在不改变任何来源参数的情况下原子重载当前生产者。
+- 无日志运行诊断：设置页用低频进程心跳排除历史 notify 假状态，并直接显示 SpringBoard、mediaserverd Hook/取帧/转换/替换以及真实 AVFoundation 代理/预览/照片回退活动；切回设置后仍可复制最后阶段和发生时间，普通 UIKit 进程启动不会覆盖相机证据。
+- 运行状态与恢复：设置页直接显示 SpringBoard 来源产帧状态、mediaserverd 系统视频接管状态和应用回退状态，并可在不改变任何来源参数的情况下原子重载当前生产者。
 - 来源故障隔离：屏幕、本地文件和网络来源的错误/完成回调都绑定当前 generation；切换后迟到的旧回调不能覆盖新来源状态。非循环本地媒体自然结束时会立即清空共享 PCM、恢复原生麦克风，并在控制面板显示“播放完成”。
 - 手机控制面板：以 iOS 15 原生 PreferenceLoader 行作为稳定主界面；页面完全出现后才刷新只读状态，离开设置立即停表。若私有 Preferences.framework 行刷新发生异常，会自动停用动态刷新并保留静态设置功能，不再拖垮 Settings。来源操作指引、本地媒体库容量/文件清单、缺失文件提示和脱敏诊断复制仍集中在同一页面。
 - VideoToolbox 像素转换：输出尺寸、像素格式和时间戳跟随真实相机原始帧。

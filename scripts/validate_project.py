@@ -173,6 +173,7 @@ def validate_preferences() -> None:
     if live_status_getters != {
         "currentSourceRuntimeStatus:",
         "currentSystemVideoPipelineStatus:",
+        "currentApplicationFallbackStatus:",
         "currentLocalVolumeHookStatus:",
         "currentLocalTransformStatus:",
     }:
@@ -204,6 +205,7 @@ def validate_preferences() -> None:
             "currentLocalVolumeHookStatus:",
             "currentSourceRuntimeStatus:",
             "currentSystemVideoPipelineStatus:",
+            "currentApplicationFallbackStatus:",
             "reloadCurrentSource:",
             "sourceRestartToken",
             "pipeline.video.heartbeat.v1",
@@ -424,6 +426,10 @@ def validate_zero_copy_bus() -> None:
             "memory_order_release",
             "VCMarkSystemPipelineActivity",
             "VCSystemPipelineIsActive",
+            "VCStartSharedRuntimeHeartbeat",
+            "VCReportMediaServerVideoRuntimeEvent",
+            "VCReportApplicationVideoRuntimeEvent",
+            "VCPackRuntimeEventState",
             "VCNotifyTokenForChannel",
             "VCShouldPublishPipelineHeartbeat",
             "VCSharedVideoControl",
@@ -663,6 +669,9 @@ def validate_hooks_and_fail_open() -> None:
             "VCNodeOutputDispatchCache",
             "VCCachedOriginalEmitForClass",
             "VCCacheOriginalEmitForClass",
+            "allowInheritedMethod",
+            "continuing low-frequency scans",
+            "VCMediaServerVideoRuntimeReplacementSucceeded",
         ),
         "system hook fail-open path",
     )
@@ -685,6 +694,8 @@ def validate_hooks_and_fail_open() -> None:
             "VCCopyStablePixelBuffer",
             "replaceSharedPixelBufferLease",
             "VCReleaseSharedVideoPixelBuffer",
+            "VCReportApplicationVideoRuntimeEvent",
+            "VCApplicationVideoRuntimePreviewFrameDisplayed",
         ),
         "application fallback",
     )
