@@ -187,6 +187,13 @@ def validate_preferences() -> None:
             "NSFileSystemFreeSize",
             "AVMediaTypeVideo",
             "AVMediaTypeAudio",
+            "VCAssetContainsRecognizableMediaTracks",
+            "loadTracksWithMediaType:AVMediaTypeVideo",
+            "loadTracksWithMediaType:AVMediaTypeAudio",
+            "VCLocalMediaTrackLoadingTimeout",
+            "dispatch_group_wait",
+            "VCLocalMediaImportErrorTrackLoadingTimeout",
+            "PHPickerConfigurationAssetRepresentationModeCompatible",
             "CFPreferencesSetAppValue(VCLocalMediaPathKey",
             "picker.allowsMultipleSelection = YES",
             "configuration.selectionLimit = 20",
@@ -234,6 +241,9 @@ def validate_preferences() -> None:
         ),
         "mobile native settings and runtime recovery",
     )
+    if "[asset tracksWithMediaType:" in controller or \
+       "PHPickerConfigurationAssetRepresentationModeCurrent" in controller:
+        fail("local media import must await tracks and request a compatible Photos asset")
     view_will_appear = controller.split("- (void)viewWillAppear:", 1)[1].split(
         "- (void)viewDidAppear:", 1
     )[0]

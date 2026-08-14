@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.20.0 - 2026-08-14
+
+- Replaced immediate synchronous local-file track inspection with bounded asynchronous `AVAsset` video/audio track loading, preventing Photos, iCloud and recently edited assets from being rejected before their track metadata is ready.
+- Split local import failures into track-loading timeout, AVFoundation parsing failure and confirmed empty-container results; the Settings alert now preserves the underlying parser description instead of reporting every case as “no recognizable tracks.”
+- Changed PHPicker from the untranscoded Current representation to the most compatible representation, improving iOS 15 import reliability for rotated, edited, HDR and cloud-backed Photos videos.
+- Added repository invariants that reject reintroducing synchronous track inspection or the less-compatible Current Photos representation.
+
 ## 2.19.0 - 2026-08-14
 
 - Removed the entire retired Auto Layout dashboard implementation from the PreferenceLoader binary, including its table-header mutation and layout state, so iOS 15 Settings now compiles only the native specifier list and optional read-only row refresh.

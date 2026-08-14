@@ -19,6 +19,7 @@
 - 在调试包中令一次可选状态行重载抛出 Objective-C exception：日志应出现 `Optional Settings live refresh disabled`，定时器应停止，Settings 进程和开关/来源/文件选择等静态行必须继续可用。
 - 用 `plutil` 分别把 `enabled/sourceType/preferredFPS/jpegQuality/staleFrameTimeout` 写成数组、字典、`NaN`、超长数字字符串与 `1e300`，随后重启 SpringBoard/mediaserverd 并进入设置页：两个系统进程和 Settings 都不得崩溃，设置页应把值恢复成布尔、枚举、60 FPS、1.0 与 8 秒的安全类型。
 - 在调试环境让首次 `notify_register_check` 返回失败：共享视频/音频状态应在约五秒后自动注册成功，期间相机路径保持 fail-open；恢复后成功 token 的每帧路径不得获取重试锁或重复注册。
+- 分别从“文件”和“照片”导入普通 MP4、带旋转元数据的 MOV、照片中刚编辑的视频及 iCloud 视频：轨道必须异步加载完成后才下结论，不能再次出现旧版的假“无轨道”提示；云端未完成时应在 30 秒后明确报告超时。再导入空容器和损坏文件，必须分别显示“确认无轨道”和带 AVFoundation 原因的解析失败。
 - 在网络 URL 文本框持续编辑 30 秒并拖动本地 FPS/JPEG 滑块：每秒状态刷新只能更新带 `vcLiveStatus` 的只读行，键盘、光标、输入内容和滑块手势不得被打断；退出该设置页后不得继续产生一秒定时刷新。
 - 保持设置页可见 30 分钟并用 Instruments/System Trace 观察：四个状态通道只在页面进程首次读取时注册，后续每秒刷新不得反复出现 `notify_register_check`/`notify_cancel`；同一刷新周期不得为每个状态行重复执行偏好域同步。
 - 依次选择网络、屏幕和本地来源，确认页面只展示对应配置组且“当前配置/操作指引”同步变化。无 URL、本地文件未选择或已被外部删除时，原生“当前配置”行必须明确提示先修复配置。

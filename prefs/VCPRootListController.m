@@ -60,7 +60,11 @@ typedef NS_ENUM(NSInteger, VCLocalMediaImportError) {
     VCLocalMediaImportErrorCopy = 5,
     VCLocalMediaImportErrorUnsupportedMedia = 6,
     VCLocalMediaImportErrorFinalize = 7,
+    VCLocalMediaImportErrorTrackLoading = 8,
+    VCLocalMediaImportErrorTrackLoadingTimeout = 9,
 };
+
+static const NSTimeInterval VCLocalMediaTrackLoadingTimeout = 30.0;
 
 static NSError *VCLocalMediaError(VCLocalMediaImportError code,
                                   NSString *message,
@@ -122,6 +126,70 @@ static NSURL *VCUniqueLocalMediaDestination(NSString *directory, NSString *filen
         : [NSString stringWithFormat:@"%@-%@", stem, NSUUID.UUID.UUIDString];
     return [NSURL fileURLWithPath:[directory stringByAppendingPathComponent:fallbackName]
                      isDirectory:NO];
+}
+
+static BOOL VCAssetContainsRecognizableMediaTracks(NSURL *url,
+                                                    NSError **errorOut) {
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url
+        options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
+    dispatch_group_t loadingGroup = dispatch_group_create();
+    __block NSArray<AVAssetTrack *> *videoTracks = nil;
+    __block NSArray<AVAssetTrack *> *audioTracks = nil;
+    __block NSError *videoError = nil;
+    __block NSError *audioError = nil;
+
+    dispatch_group_enter(loadingGroup);
+    [asset loadTracksWithMediaType:AVMediaTypeVideo
+                 completionHandler:^(NSArray<AVAssetTrack *> *tracks, NSError *error) {
+        videoTracks = tracks;
+        videoError = error;
+        dispatch_group_leave(loadingGroup);
+    }];
+    dispatch_group_enter(loadingGroup);
+    [asset loadTracksWithMediaType:AVMediaTypeAudio
+                 completionHandler:^(NSArray<AVAssetTrack *> *tracks, NSError *error) {
+        audioTracks = tracks;
+        audioError = error;
+        dispatch_group_leave(loadingGroup);
+    }];
+
+    int64_t timeoutNanoseconds =
+        (int64_t)(VCLocalMediaTrackLoadingTimeout * (NSTimeInterval)NSEC_PER_SEC);
+    long waitResult = dispatch_group_wait(
+        loadingGroup,
+        dispatch_time(DISPATCH_TIME_NOW, timeoutNanoseconds));
+    if (waitResult != 0) {
+        [asset cancelLoading];
+        if (errorOut) {
+            *errorOut = VCLocalMediaError(
+                VCLocalMediaImportErrorTrackLoadingTimeout,
+                @"读取媒体轨道超时。若视频位于 iCloud，请等待下载完成后重试。",
+                nil);
+        }
+        return NO;
+    }
+    if (videoTracks.count > 0 || audioTracks.count > 0) return YES;
+
+    NSError *loadingError = videoError ?: audioError;
+    if (loadingError) {
+        if (errorOut) {
+            NSString *message = [NSString stringWithFormat:
+                @"AVFoundation 无法读取所选文件的媒体轨道：%@",
+                loadingError.localizedDescription ?: @"未知解析错误"];
+            *errorOut = VCLocalMediaError(
+                VCLocalMediaImportErrorTrackLoading,
+                message,
+                loadingError);
+        }
+        return NO;
+    }
+    if (errorOut) {
+        *errorOut = VCLocalMediaError(
+            VCLocalMediaImportErrorUnsupportedMedia,
+            @"文件已完整读取，但确认不包含视频或音频轨道。请使用 MP4/MOV（H.264/HEVC）或 M4A/MP3。",
+            nil);
+    }
+    return NO;
 }
 
 static NSURL *VCImportLocalMediaURL(NSURL *sourceURL,
@@ -209,16 +277,10 @@ static NSURL *VCImportLocalMediaURL(NSURL *sourceURL,
         return nil;
     }
 
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:stagingURL
-                                            options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
-    BOOL containsVideo = [asset tracksWithMediaType:AVMediaTypeVideo].count > 0;
-    BOOL containsAudio = [asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
-    if (!containsVideo && !containsAudio) {
+    NSError *trackLoadingError = nil;
+    if (!VCAssetContainsRecognizableMediaTracks(stagingURL, &trackLoadingError)) {
         [fileManager removeItemAtURL:stagingURL error:nil];
-        if (errorOut) {
-            *errorOut = VCLocalMediaError(VCLocalMediaImportErrorUnsupportedMedia,
-                                          @"所选文件不包含可识别的视频或音频轨道。", nil);
-        }
+        if (errorOut) *errorOut = trackLoadingError;
         return nil;
     }
 
@@ -693,8 +755,11 @@ static BOOL VCPRepairStoredPreferences(void) {
             // useful as a volume-button playlist without opening unbounded
             // parallel iCloud downloads.
             configuration.selectionLimit = 20;
+            // Edited, rotated, HDR and iCloud-backed assets may expose a
+            // current representation that older iOS 15 AVFoundation cannot
+            // parse reliably. Ask Photos for its most compatible file instead.
             configuration.preferredAssetRepresentationMode =
-                PHPickerConfigurationAssetRepresentationModeCurrent;
+                PHPickerConfigurationAssetRepresentationModeCompatible;
             PHPickerViewController *picker =
                 [[PHPickerViewController alloc] initWithConfiguration:configuration];
             picker.delegate = strongSelf;
