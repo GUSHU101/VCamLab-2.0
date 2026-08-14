@@ -7,6 +7,7 @@
 - Added one bounded local-reader recovery after a transient `AVAssetReader` failure. The stale asset/track geometry cache is discarded before reopening, but a corrupt or unsupported file still fails open after the single retry rather than entering an infinite restart loop.
 - Extended repository validation to require content-type filename repair, fresh-asset retry budgeting, source-switch cancellation and bounded decoder recovery, and re-ran the complete Windows transport/runtime self-test.
 - Fixed a CI false-green condition found during log review: Windows source checks now stop after every nonzero child exit code, and the standalone directory has deterministic CRLF checkout bytes on Windows and Linux so its committed size/SHA-256 manifest validates identically on both runners.
+- Kept the active `AVURLAsset` cancellation handle alive through video-geometry loading and made retry cleanup identity-aware, so stopping or replacing a source cancels the complete metadata transaction without allowing an older attempt to clear a newer handle.
 
 ## 2.21.0 - 2026-08-15
 

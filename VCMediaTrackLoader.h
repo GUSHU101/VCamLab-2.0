@@ -12,7 +12,7 @@ typedef NS_ENUM(NSInteger, VCMediaTrackLoadResult) {
 };
 
 typedef BOOL (^VCMediaTrackLoadCancellationBlock)(void);
-typedef void (^VCMediaTrackAssetObserverBlock)(AVURLAsset *asset);
+typedef void (^VCMediaTrackAssetObserverBlock)(AVURLAsset *asset, BOOL loading);
 
 static inline BOOL VCMediaWaitForRetryDelay(
     NSTimeInterval delay,
@@ -186,7 +186,7 @@ static inline VCMediaTrackLoadResult VCMediaLoadTracksFromURL(
         }
 
         AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:options];
-        if (assetObserver) assetObserver(asset);
+        if (assetObserver) assetObserver(asset, YES);
         NSArray<AVAssetTrack *> *videoTracks = nil;
         NSArray<AVAssetTrack *> *audioTracks = nil;
         NSError *attemptError = nil;
@@ -196,7 +196,6 @@ static inline VCMediaTrackLoadResult VCMediaLoadTracksFromURL(
                                                            &videoTracks,
                                                            &audioTracks,
                                                            &attemptError);
-        if (assetObserver) assetObserver(nil);
         if (result == VCMediaTrackLoadResultLoaded &&
             (videoTracks.count > 0 || audioTracks.count > 0)) {
             if (loadedAssetOut) *loadedAssetOut = asset;
@@ -205,6 +204,7 @@ static inline VCMediaTrackLoadResult VCMediaLoadTracksFromURL(
             return VCMediaTrackLoadResultLoaded;
         }
 
+        if (assetObserver) assetObserver(asset, NO);
         finalResult = result;
         finalError = attemptError;
         [asset cancelLoading];

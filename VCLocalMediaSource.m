@@ -173,14 +173,17 @@ static const NSTimeInterval VCLocalMediaTrackLoadingTimeout = 30.0;
             ^BOOL{
                 return ![self isGenerationCurrent:generation];
             },
-            ^(AVURLAsset *observedAsset) {
+            ^(AVURLAsset *observedAsset, BOOL loading) {
                 BOOL cancelObservedAsset = NO;
                 @synchronized (self) {
-                    if (observedAsset &&
-                        (!self.running || self.lifecycleGeneration != generation)) {
-                        cancelObservedAsset = YES;
-                    } else {
+                    BOOL current = self.running &&
+                        self.lifecycleGeneration == generation;
+                    if (loading && current) {
                         self.loadingAsset = observedAsset;
+                    } else if (loading) {
+                        cancelObservedAsset = YES;
+                    } else if (self.loadingAsset == observedAsset) {
+                        self.loadingAsset = nil;
                     }
                 }
                 if (cancelObservedAsset) [observedAsset cancelLoading];
@@ -212,7 +215,7 @@ static const NSTimeInterval VCLocalMediaTrackLoadingTimeout = 30.0;
         }
         BOOL current = NO;
         @synchronized (self) {
-            self.loadingAsset = nil;
+            if (self.loadingAsset == asset) self.loadingAsset = nil;
             current = self.running && self.lifecycleGeneration == generation;
             if (current && loadingResult == VCMediaTrackLoadResultLoaded &&
                 geometryResult == VCMediaTrackLoadResultLoaded &&
