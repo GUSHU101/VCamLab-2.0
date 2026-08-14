@@ -2,7 +2,6 @@
 #import <Preferences/PSSpecifier.h>
 #import <AVFoundation/AVFoundation.h>
 #import <PhotosUI/PhotosUI.h>
-#import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #import <limits.h>
 #import <mach/mach_time.h>
@@ -75,8 +74,6 @@ typedef NS_ENUM(uint64_t, VCPStreamStatus) {
     _cardView = [UIView new];
     _cardView.translatesAutoresizingMaskIntoConstraints = NO;
     _cardView.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    _cardView.layer.cornerRadius = 14.0;
-    _cardView.layer.cornerCurve = kCACornerCurveContinuous;
     _cardView.accessibilityIdentifier = @"VirtualCamProStatusCard";
     [self addSubview:_cardView];
 
@@ -419,11 +416,128 @@ static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
     return token >= 0 && notify_get_state(token, stateOut) == NOTIFY_STATUS_OK;
 }
 
+static BOOL VCPReadFinitePreferenceNumber(id value, double *numberOut) {
+    if (![value isKindOfClass:NSNumber.class] &&
+        ![value isKindOfClass:NSString.class]) {
+        return NO;
+    }
+    double number = [value doubleValue];
+    if (!isfinite(number)) return NO;
+    if (numberOut) *numberOut = number;
+    return YES;
+}
+
+static BOOL VCPNumberIsIntegral(double number) {
+    return isfinite(number) && fabs(number - round(number)) < 0.000001;
+}
+
+static BOOL VCPSetPreferenceValueIfDifferent(CFStringRef key, id value) {
+    id current = CFBridgingRelease(CFPreferencesCopyAppValue(key,
+                                                             VCPreferencesDomain));
+    if ((current == value) || [current isEqual:value]) return NO;
+    CFPreferencesSetAppValue(key, (__bridge CFPropertyListRef)value,
+                             VCPreferencesDomain);
+    return YES;
+}
+
+static BOOL VCPRepairStoredPreferences(void) {
+    __block BOOL changed = NO;
+    NSArray<NSDictionary *> *integerRules = @[
+        @{ @"key": @"sourceType", @"default": @0,
+           @"allowed": @[@0, @1, @2] },
+        @{ @"key": @"preferredFPS", @"default": @60,
+           @"minimum": @1, @"maximum": @240 },
+        @{ @"key": @"sourceRotation", @"default": @0,
+           @"allowed": @[@0, @90, @180, @270] },
+        @{ @"key": @"maximumPixelDimension", @"default": @1920,
+           @"allowed": @[@1280, @1920, @2560, @3840] },
+    ];
+    for (NSDictionary *rule in integerRules) {
+        NSString *key = rule[@"key"];
+        id value = CFBridgingRelease(CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)key, VCPreferencesDomain));
+        double number = 0;
+        BOOL valid = VCPReadFinitePreferenceNumber(value, &number) &&
+                     VCPNumberIsIntegral(number);
+        NSInteger integer = valid ? (NSInteger)llround(number) : 0;
+        NSArray<NSNumber *> *allowed = rule[@"allowed"];
+        if (valid && allowed) valid = [allowed containsObject:@(integer)];
+        NSNumber *minimum = rule[@"minimum"];
+        NSNumber *maximum = rule[@"maximum"];
+        if (valid && minimum) valid = integer >= minimum.integerValue;
+        if (valid && maximum) valid = integer <= maximum.integerValue;
+        NSNumber *normalized = valid ? @(integer) : rule[@"default"];
+        changed |= VCPSetPreferenceValueIfDifferent(
+            (__bridge CFStringRef)key, normalized);
+    }
+
+    NSArray<NSDictionary *> *realRules = @[
+        @{ @"key": @"jpegQuality", @"default": @1.0,
+           @"minimum": @0.5, @"maximum": @1.0 },
+        @{ @"key": @"staleFrameTimeout", @"default": @8.0,
+           @"minimum": @2.0, @"maximum": @30.0 },
+    ];
+    for (NSDictionary *rule in realRules) {
+        NSString *key = rule[@"key"];
+        id value = CFBridgingRelease(CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)key, VCPreferencesDomain));
+        double number = 0;
+        BOOL valid = VCPReadFinitePreferenceNumber(value, &number) &&
+                     number >= [rule[@"minimum"] doubleValue] &&
+                     number <= [rule[@"maximum"] doubleValue];
+        NSNumber *normalized = valid ? @(number) : rule[@"default"];
+        changed |= VCPSetPreferenceValueIfDifferent(
+            (__bridge CFStringRef)key, normalized);
+    }
+
+    NSDictionary<NSString *, NSNumber *> *booleanDefaults = @{
+        @"enabled": @NO,
+        @"loopLocalMedia": @YES,
+        @"mirrorSource": @NO,
+        @"aspectFill": @YES,
+        @"holdLastFrame": @YES,
+    };
+    [booleanDefaults enumerateKeysAndObjectsUsingBlock:^(
+        NSString *key, NSNumber *defaultValue, __unused BOOL *stop) {
+        id value = CFBridgingRelease(CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)key, VCPreferencesDomain));
+        NSNumber *normalized = nil;
+        if ([value isKindOfClass:NSNumber.class] ||
+            [value isKindOfClass:NSString.class]) {
+            normalized = @([value boolValue]);
+        } else {
+            normalized = defaultValue;
+        }
+        changed |= VCPSetPreferenceValueIfDifferent(
+            (__bridge CFStringRef)key, normalized);
+    }];
+
+    NSDictionary<NSString *, NSString *> *stringDefaults = @{
+        @"streamURL": @"",
+        @"localMediaPath": @"",
+        @"sourceRestartToken": @"",
+    };
+    [stringDefaults enumerateKeysAndObjectsUsingBlock:^(
+        NSString *key, NSString *defaultValue, __unused BOOL *stop) {
+        id value = CFBridgingRelease(CFPreferencesCopyAppValue(
+            (__bridge CFStringRef)key, VCPreferencesDomain));
+        NSString *normalized = [value isKindOfClass:NSString.class]
+            ? value : defaultValue;
+        changed |= VCPSetPreferenceValueIfDifferent(
+            (__bridge CFStringRef)key, normalized);
+    }];
+
+    if (changed) CFPreferencesAppSynchronize(VCPreferencesDomain);
+    return changed;
+}
+
 @interface VCPRootListController : PSListController
     <NSURLSessionDataDelegate, UIDocumentPickerDelegate, PHPickerViewControllerDelegate> {
     VCJPEGParserState _streamTestJPEGParserState;
     NSUInteger _streamTestJPEGOffset;
     uint64_t _lastPreferencesSyncMilliseconds;
+    BOOL _runtimePresentationDisabled;
+    BOOL _dashboardLayoutInProgress;
 }
 @property (nonatomic, strong) NSURLSession *streamTestSession;
 @property (nonatomic, strong) NSURLSessionDataTask *streamTestTask;
@@ -449,6 +563,8 @@ static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
 - (void)layoutDashboardHeaderIfNeeded;
 - (void)startStatusRefreshTimer;
 - (void)stopStatusRefreshTimer;
+- (void)performSafeRuntimePresentationRefresh;
+- (void)disableRuntimePresentationAfterException:(NSException *)exception;
 - (void)synchronizePreferencesIfNeeded:(BOOL)force;
 - (NSArray<NSURL *> *)localMediaLibraryEntries;
 - (id)currentPackageVersion:(PSSpecifier *)specifier;
@@ -472,25 +588,29 @@ static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
                             target:self
                             action:@selector(refreshControlPanel:)];
     self.navigationItem.rightBarButtonItem.accessibilityLabel = @"刷新运行状态";
-    [self installDashboardHeaderIfNeeded];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    if (_specifiers) [self reloadSpecifiers];
-    [self installDashboardHeaderIfNeeded];
-    [self refreshRuntimePresentation];
+    @try {
+        if (_specifiers) [self reloadSpecifiers];
+    } @catch (NSException *exception) {
+        [self disableRuntimePresentationAfterException:exception];
+    }
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // Preferences.framework is private and differs between iOS point releases.
+    // Wait until its table transition is complete before touching individual
+    // rows; a failed optional refresh must never terminate the Settings app.
+    [self performSafeRuntimePresentationRefresh];
     [self startStatusRefreshTimer];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [self stopStatusRefreshTimer];
-}
-
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    [self layoutDashboardHeaderIfNeeded];
 }
 
 - (void)installDashboardHeaderIfNeeded {
@@ -507,30 +627,36 @@ static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
 }
 
 - (void)layoutDashboardHeaderIfNeeded {
+    if (_dashboardLayoutInProgress || _runtimePresentationDisabled) return;
     UITableView *tableView = [self table];
     VCPDashboardHeaderView *header = self.dashboardHeader;
     CGFloat width = CGRectGetWidth(tableView.bounds);
     if (!tableView || !header || width <= 0) return;
-    header.frame = CGRectMake(0, 0, width, MAX(1.0, CGRectGetHeight(header.frame)));
-    CGSize fittingSize = [header systemLayoutSizeFittingSize:CGSizeMake(width, 1.0)
-                              withHorizontalFittingPriority:UILayoutPriorityRequired
-                                    verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
-    CGFloat height = MAX(142.0, ceil(fittingSize.height));
-    if (fabs(CGRectGetHeight(header.frame) - height) > 0.5 ||
-        fabs(CGRectGetWidth(header.frame) - width) > 0.5) {
-        header.frame = CGRectMake(0, 0, width, height);
-        tableView.tableHeaderView = header;
+    _dashboardLayoutInProgress = YES;
+    @try {
+        header.frame = CGRectMake(0, 0, width, MAX(1.0, CGRectGetHeight(header.frame)));
+        CGSize fittingSize = [header systemLayoutSizeFittingSize:CGSizeMake(width, 1.0)
+                                  withHorizontalFittingPriority:UILayoutPriorityRequired
+                                        verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
+        CGFloat height = MAX(142.0, ceil(fittingSize.height));
+        if (fabs(CGRectGetHeight(header.frame) - height) > 0.5 ||
+            fabs(CGRectGetWidth(header.frame) - width) > 0.5) {
+            header.frame = CGRectMake(0, 0, width, height);
+            tableView.tableHeaderView = header;
+        }
+    } @finally {
+        _dashboardLayoutInProgress = NO;
     }
 }
 
 - (void)startStatusRefreshTimer {
-    if (self.statusRefreshTimer) return;
+    if (_runtimePresentationDisabled || self.statusRefreshTimer || !self.view.window) return;
     __weak VCPRootListController *weakSelf = self;
     self.statusRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
                                                               repeats:YES
                                                                 block:^(__unused NSTimer *timer) {
         VCPRootListController *strongSelf = weakSelf;
-        if (strongSelf.view.window) [strongSelf refreshRuntimePresentation];
+        if (strongSelf.view.window) [strongSelf performSafeRuntimePresentationRefresh];
     }];
     self.statusRefreshTimer.tolerance = 0.20;
 }
@@ -538,6 +664,34 @@ static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
 - (void)stopStatusRefreshTimer {
     [self.statusRefreshTimer invalidate];
     self.statusRefreshTimer = nil;
+}
+
+- (void)performSafeRuntimePresentationRefresh {
+    if (_runtimePresentationDisabled || !NSThread.isMainThread) return;
+    @try {
+        [self refreshRuntimePresentation];
+    } @catch (NSException *exception) {
+        [self disableRuntimePresentationAfterException:exception];
+    }
+}
+
+- (void)disableRuntimePresentationAfterException:(NSException *)exception {
+    if (_runtimePresentationDisabled) return;
+    _runtimePresentationDisabled = YES;
+    [self stopStatusRefreshTimer];
+    NSLog(@"[VirtualCamPro] Optional Settings dashboard disabled after %@: %@",
+          exception.name ?: @"exception", exception.reason ?: @"unknown reason");
+    // Keep the native PreferenceLoader rows usable. The dashboard is optional,
+    // so any layout/runtime incompatibility degrades to the static list.
+    @try {
+        UITableView *tableView = [self table];
+        if (tableView.tableHeaderView == self.dashboardHeader) {
+            tableView.tableHeaderView = nil;
+        }
+        self.dashboardHeader = nil;
+        self.navigationItem.rightBarButtonItem = nil;
+    } @catch (__unused NSException *cleanupException) {
+    }
 }
 
 - (void)synchronizePreferencesIfNeeded:(BOOL)force {
@@ -552,40 +706,28 @@ static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
 }
 
 - (void)refreshControlPanel:(id)sender {
-    [self refreshRuntimePresentation];
+    [self performSafeRuntimePresentationRefresh];
     UISelectionFeedbackGenerator *feedback = [UISelectionFeedbackGenerator new];
     [feedback selectionChanged];
 }
 
 - (void)refreshRuntimePresentation {
     [self synchronizePreferencesIfNeeded:NO];
-    id enabledValue = CFBridgingRelease(
-        CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
-    uint64_t rawStatus = VCPStreamStatusDisabled;
-    VCPGetSystemStreamStatus(&rawStatus);
-    VCPStreamStatus status = rawStatus <= VCPStreamStatusCompleted
-        ? (VCPStreamStatus)rawStatus : VCPStreamStatusDisabled;
-    NSString *source = [self currentSourceConfigurationSummary:nil];
-    NSString *pipeline = [self currentSystemVideoPipelineStatus:nil];
-    NSString *version = [self currentPackageVersion:nil];
-    [self.dashboardHeader updateEnabled:[enabledValue boolValue]
-                                 status:status
-                                 source:source
-                               pipeline:pipeline
-                                version:version];
-    [self layoutDashboardHeaderIfNeeded];
-
     // Only lightweight, read-only status rows opt into the one-second refresh.
     // Editing cells and sliders are never reloaded under the user's finger.
     for (PSSpecifier *specifier in [_specifiers copy]) {
         if ([[specifier propertyForKey:@"vcLiveStatus"] boolValue]) {
-            [self reloadSpecifier:specifier animated:NO];
+            // The one-argument selector exists across older iOS 15
+            // Preferences.framework variants and internally requests a
+            // non-animated reload.
+            [self reloadSpecifier:specifier];
         }
     }
 }
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
+        VCPRepairStoredPreferences();
         [self synchronizePreferencesIfNeeded:YES];
         id sourceValue = CFBridgingRelease(
             CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
@@ -625,14 +767,23 @@ static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
                                           YES);
     if ([key isEqualToString:@"sourceType"]) {
         _specifiers = nil;
-        [self reloadSpecifiers];
+        @try {
+            [self reloadSpecifiers];
+        } @catch (NSException *exception) {
+            [self disableRuntimePresentationAfterException:exception];
+        }
     }
     for (PSSpecifier *statusSpecifier in [_specifiers copy]) {
         if ([[statusSpecifier propertyForKey:@"vcConfigurationStatus"] boolValue]) {
-            [self reloadSpecifier:statusSpecifier animated:NO];
+            @try {
+                [self reloadSpecifier:statusSpecifier];
+            } @catch (NSException *exception) {
+                [self disableRuntimePresentationAfterException:exception];
+                break;
+            }
         }
     }
-    [self refreshRuntimePresentation];
+    [self performSafeRuntimePresentationRefresh];
 }
 
 - (void)chooseLocalMedia:(PSSpecifier *)specifier {

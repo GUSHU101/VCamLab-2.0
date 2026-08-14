@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.18.0 - 2026-08-14
+
+- Changed the iOS 15 Settings entry to launch with native PreferenceLoader rows only; the custom Auto Layout table header is no longer installed during controller loading, and the preference bundle no longer links QuartzCore solely for dashboard decoration.
+- Deferred optional runtime-row refresh from `viewWillAppear:` until `viewDidAppear:` so Preferences.framework finishes its navigation/table transition before individual specifiers are reloaded.
+- Replaced animated private-row reload calls with the older one-argument selector available across iOS 15 Preferences.framework variants.
+- Added an Objective-C exception boundary around optional status refresh, timer callbacks, source-specific reloads and legacy header cleanup. On an implementation mismatch the timer is stopped and the native settings list remains usable instead of terminating the Settings process.
+- Normalized every stored string, boolean, integer and real preference before Root.plist loads; malformed legacy plist values, NaN, invalid enums and out-of-range sliders are repaired to safe typed values instead of reaching a PreferenceLoader cell or receiving an incompatible selector.
+- Added repository invariants that reject launch-time custom header installation, QuartzCore coupling, pre-appearance status refresh and the less-compatible animated selector.
+
 ## 2.17.0 - 2026-08-14
 
 - Generation-gated every screen, local-file and network error callback so a delayed failure from an already stopped producer can no longer overwrite the live status of a newly selected source.

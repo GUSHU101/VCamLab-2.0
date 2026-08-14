@@ -33,6 +33,18 @@ ls -la /var/jb/Library/PreferenceLoader/Preferences/VirtualCamPro.plist
 
 确认 PreferenceLoader 已安装，然后重启“设置”应用或执行一次 userspace reboot。
 
+## 点击 VirtualCamPro 后设置闪退
+
+先确认安装的是 2.18.0 或更高版本。该版本不再在页面加载阶段安装自定义 table header，也不为设置面板单独链接 QuartzCore；动态状态只在导航转场结束后使用 iOS 15 兼容的一参数 selector 刷新。可选刷新异常会自动停表，原生开关和来源配置仍应可用。
+
+如果 2.18.0 仍闪退，先从 `/var/mobile/Library/Logs/CrashReporter/` 导出最新的 `Preferences-*.ips` 或 `Preferences-*.crash`，不要只提供“闪退”截图：
+
+```bash
+ls -lt /var/mobile/Library/Logs/CrashReporter/Preferences* | head
+```
+
+同时执行 `dpkg -s com.murkaska.virtualcampro`，确认版本和架构。崩溃日志中的 `Exception Type`、`Termination Reason` 和崩溃线程回溯可以区分 PreferenceLoader 类加载、缺失动态符号、Objective-C selector 与其他第三方设置插件冲突；没有这些证据不能把所有闪退归因于相机媒体管线。
+
 ## 统一系统管线仍显示真实相机
 
 查看日志：

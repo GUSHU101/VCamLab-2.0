@@ -216,14 +216,43 @@ def validate_preferences() -> None:
             "VCPNotifyTokenForChannel",
             "synchronizePreferencesIfNeeded:",
             "VCPStreamStatusCompleted",
+            "viewDidAppear:",
+            "performSafeRuntimePresentationRefresh",
+            "disableRuntimePresentationAfterException:",
+            "_runtimePresentationDisabled",
+            "_dashboardLayoutInProgress",
+            "tableView.tableHeaderView = nil",
+            "VCPRepairStoredPreferences",
+            "VCPReadFinitePreferenceNumber",
+            "VCPNumberIsIntegral",
         ),
         "mobile source dashboard and runtime recovery",
     )
+    view_will_appear = controller.split("- (void)viewWillAppear:", 1)[1].split(
+        "- (void)viewDidAppear:", 1
+    )[0]
+    if "refreshRuntimePresentation" in view_will_appear or \
+       "startStatusRefreshTimer" in view_will_appear:
+        fail("optional Settings status refresh must wait until viewDidAppear")
+    if "reloadSpecifier:specifier animated:" in controller or \
+       "reloadSpecifier:statusSpecifier animated:" in controller:
+        fail("Settings live rows must use the iOS 15-compatible reload selector")
+    if "[self installDashboardHeaderIfNeeded]" in controller:
+        fail("iOS 15 Settings must use native PreferenceLoader rows at launch")
+    if "QuartzCore" in bundle_makefile:
+        fail("preference bundle must not require the optional QuartzCore dashboard")
+    specifier_loader = controller.split("- (NSArray *)specifiers", 1)[1].split(
+        "- (void)setPreferenceValue:", 1
+    )[0]
+    repair_index = specifier_loader.find("VCPRepairStoredPreferences()")
+    load_index = specifier_loader.find("loadSpecifiersFromPlistName")
+    if repair_index < 0 or load_index < 0 or repair_index > load_index:
+        fail("stored preference types must be normalized before Root.plist loads")
     if "notify_cancel(" in controller or controller.count("notify_register_check(") != 1:
         fail("settings live polling must reuse process-lifetime Darwin notify tokens")
     require(
         bundle_makefile,
-        ("AVFoundation", "PhotosUI", "QuartzCore"),
+        ("AVFoundation", "PhotosUI"),
         "preference bundle frameworks",
     )
     if "query" in controller.split("copyRuntimeDiagnostics:", 1)[1].split(
