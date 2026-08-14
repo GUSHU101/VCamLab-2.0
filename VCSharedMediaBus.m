@@ -143,6 +143,14 @@ static BOOL VCNotifyStateIsRecent(VCNotifyChannel timestampChannel,
     return now - timestamp <= maximumAgeMilliseconds;
 }
 
+static BOOL VCProducerRuntimeEventPublishesVideo(uint64_t runtimeState) {
+    VCProducerVideoRuntimeEvent event = (VCProducerVideoRuntimeEvent)
+        VCEventFromRuntimeState(runtimeState);
+    return event == VCProducerVideoRuntimePublishedControlAndDirect ||
+        event == VCProducerVideoRuntimePublishedDirectFallback ||
+        event == VCProducerVideoRuntimePublishedControlOnly;
+}
+
 void VCStartSharedRuntimeHeartbeat(VCSharedRuntimeProcess process) {
     static dispatch_source_t heartbeatTimers[3];
     static os_unfair_lock heartbeatLock = OS_UNFAIR_LOCK_INIT;
@@ -498,6 +506,9 @@ VCSharedVideoFailureReason VCSharedVideoLastFailureReason(void) {
     BOOL _controlRefreshPending;
     uint64_t _cachedSurfaceState;
     CVPixelBufferRef _cachedPixelBuffer;
+    uint64_t _lastObservedPublicationState;
+    uint64_t _lastObservedPublicationMilliseconds;
+    uint64_t _lastObservedProducerRuntimeState;
 }
 @end
 
@@ -611,12 +622,50 @@ VCSharedVideoFailureReason VCSharedVideoLastFailureReason(void) {
     return YES;
 }
 
+- (uint64_t)effectiveTimestampForPublishedState:(uint64_t)surfaceState
+                           producerTimestamp:(uint64_t)producerTimestamp {
+    uint64_t now = VCMonotonicMilliseconds();
+    uint64_t runtimeState = 0;
+    BOOL hasRuntimeState = VCNotifyReadState(
+        VCNotifyChannelProducerVideoRuntime,
+        &runtimeState);
+    BOOL runtimePublishesVideo = hasRuntimeState && runtimeState != 0 &&
+        VCProducerRuntimeEventPublishesVideo(runtimeState);
+    uint64_t runtimeTimestamp = runtimePublishesVideo
+        ? VCTimestampFromRuntimeState(runtimeState) : 0;
+    BOOL runtimeTimestampRecent = runtimePublishesVideo &&
+        VCSharedTimestampIsRecent(now,
+                                  runtimeTimestamp,
+                                  VC_RUNTIME_HEARTBEAT_MAX_AGE_MS);
+
+    os_unfair_lock_lock(&_lock);
+    BOOL generationAdvanced = surfaceState != 0 &&
+        surfaceState != _lastObservedPublicationState;
+    BOOL runtimeAdvanced = runtimePublishesVideo &&
+        runtimeState != _lastObservedProducerRuntimeState;
+    if (surfaceState != 0) _lastObservedPublicationState = surfaceState;
+    if (hasRuntimeState) _lastObservedProducerRuntimeState = runtimeState;
+    if (generationAdvanced || runtimeAdvanced || runtimeTimestampRecent) {
+        _lastObservedPublicationMilliseconds = now;
+    }
+    uint64_t localTimestamp = _lastObservedPublicationMilliseconds;
+    os_unfair_lock_unlock(&_lock);
+
+    return VCResolveConsumerFrameTimestamp(
+        now,
+        producerTimestamp,
+        localTimestamp,
+        runtimeAdvanced || runtimeTimestampRecent);
+}
+
 - (BOOL)readLatestPublishedState:(uint64_t *)surfaceState
           timestampMilliseconds:(uint64_t *)timestampMilliseconds {
     uint64_t state = 0;
     uint64_t timestamp = 0;
     if ([self readDirectPublishedState:&state
                  timestampMilliseconds:&timestamp]) {
+        timestamp = [self effectiveTimestampForPublishedState:state
+                                            producerTimestamp:timestamp];
         if (surfaceState) *surfaceState = state;
         if (timestampMilliseconds) *timestampMilliseconds = timestamp;
         return YES;
@@ -624,6 +673,8 @@ VCSharedVideoFailureReason VCSharedVideoLastFailureReason(void) {
     if ([self readControlSurfaceState:&state
                 timestampMilliseconds:&timestamp]) {
         if (state != 0) {
+            timestamp = [self effectiveTimestampForPublishedState:state
+                                                producerTimestamp:timestamp];
             if (surfaceState) *surfaceState = state;
             if (timestampMilliseconds) *timestampMilliseconds = timestamp;
             VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);

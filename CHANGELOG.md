@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.24.2 - 2026-08-15
+
+- Fixed a concrete iOS 15.8.8 shared-frame false-stale failure. Every consumer now maintains freshness in its own monotonic-clock domain and refreshes that observation when the published generation advances or SpringBoard's packed producer-runtime state changes. A zero, future or temporarily stuck direct timestamp can no longer hide an actively published global IOSurface, while a genuinely stopped producer still ages out under the configured policy.
+- Unified the direct Darwin-state and control-IOSurface paths behind the same effective timestamp resolver, including bounded producer-heartbeat assistance and a first-observation grace period for newly attached camera processes.
+- Kept the SpringBoard volume-hook notify token alive for the process lifetime, with recovery after a real `notify_set_state` failure. Settings no longer remains indefinitely at “scanning SpringBoard volume entries” after the scan has completed.
+- Added iOS 15 hardware `volumeIncrease/DecreasePressDown` selector variants to the ABI-validated volume scan, and extended portable protocol and repository regression checks for clock-domain recovery and persistent volume diagnostics.
+
 ## 2.24.1 - 2026-08-15
 
 - Removed the global FFmpeg `-flags low_delay` option from the Windows bridge. FFmpeg 8.1.1 rejects that MPEG-2-only forcing flag when the native MJPEG encoder initializes frame threading, which previously produced an immediate `ff_frame_thread_encoder_init failed` / exit `-22` restart loop even though the isolated encoder benchmark passed.

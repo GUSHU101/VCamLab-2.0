@@ -73,6 +73,15 @@ static void testSharedTimestampFreshness(void) {
     assert(!VCSharedTimestampIsRecent(0, 0, 100));
 }
 
+static void testConsumerFrameTimestampResolution(void) {
+    assert(VCResolveConsumerFrameTimestamp(5000, 4900, 0, 0) == 4900);
+    assert(VCResolveConsumerFrameTimestamp(5000, 100, 4990, 0) == 4990);
+    assert(VCResolveConsumerFrameTimestamp(5000, 6000, 4980, 0) == 4980);
+    assert(VCResolveConsumerFrameTimestamp(5000, 0, 0, 1) == 5000);
+    assert(VCResolveConsumerFrameTimestamp(5000, 6000, 0, 0) == 0);
+    assert(VCResolveConsumerFrameTimestamp(0, 0, 0, 1) == 0);
+}
+
 static void testVideoControlAtomicLayout(void) {
     assert(sizeof(VCSharedVideoControl) >= 24);
     assert(offsetof(VCSharedVideoControl, surfaceState) %
@@ -150,6 +159,7 @@ int main(void) {
     testRuntimeEventStateRoundTrip();
     testVolumeHookStatusRoundTrip();
     testSharedTimestampFreshness();
+    testConsumerFrameTimestampResolution();
     testVideoControlAtomicLayout();
     testAudioRingWrap();
     testAudioReadCursor();

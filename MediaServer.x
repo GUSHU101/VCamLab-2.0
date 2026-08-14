@@ -79,15 +79,22 @@ static uint8_t VCVolumeDeltaHookCount = 0;
 static BOOL VCVolumeHookScanComplete = NO;
 static const char *VCLocalVolumeHookStatusNotificationName =
     "com.murkaska.virtualcampro/local-volume-hook.status";
+static int VCVolumeHookStatusToken = -1;
 
 static void VCInstallMediaServerHook(NSUInteger attempt);
 static void VCInstallSpringBoardVolumeHooks(NSUInteger attempt);
 static Method VCDirectInstanceMethod(Class candidate, SEL selector);
 
 static void VCPublishVolumeHookStatus(void) {
-    int token = -1;
-    if (notify_register_check(VCLocalVolumeHookStatusNotificationName, &token) !=
-        NOTIFY_STATUS_OK) return;
+    // Keep the registration alive for SpringBoard's lifetime. Cancelling it
+    // immediately after notify_set_state can discard the only owner of this
+    // diagnostic state and makes Settings appear to scan forever.
+    if (VCVolumeHookStatusToken < 0 &&
+        notify_register_check(VCLocalVolumeHookStatusNotificationName,
+                              &VCVolumeHookStatusToken) != NOTIFY_STATUS_OK) {
+        VCVolumeHookStatusToken = -1;
+        return;
+    }
     uint64_t state = VCPackVolumeHookStatus(
         VCVolumeHookScanComplete,
         VCVolumeUpHookInstalled,
@@ -95,9 +102,12 @@ static void VCPublishVolumeHookStatus(void) {
         VCVolumeDeltaHookCount > 0,
         VCVolumeDirectionalHookCount,
         VCVolumeDeltaHookCount);
-    notify_set_state(token, state);
+    if (notify_set_state(VCVolumeHookStatusToken, state) != NOTIFY_STATUS_OK) {
+        notify_cancel(VCVolumeHookStatusToken);
+        VCVolumeHookStatusToken = -1;
+        return;
+    }
     notify_post(VCLocalVolumeHookStatusNotificationName);
-    notify_cancel(token);
 }
 
 static BOOL VCMethodIsVoidWithNoExplicitArguments(Method method) {
@@ -312,12 +322,16 @@ static void VCScanKnownVolumeClasses(void) {
         "volumeIncrease", "_volumeIncrease", "handleVolumeUp",
         "_handleVolumeUp", "volumeUpButtonPressed",
         "volumeIncreaseButtonPressed", "performVolumeUp", "_performVolumeUp",
+        "volumeIncreasePressDown", "_volumeIncreasePressDown",
+        "volumeUpPressDown", "_volumeUpPressDown",
     };
     const char *downSelectors[] = {
         "decreaseVolume", "_decreaseVolume", "volumeDown", "_volumeDown",
         "volumeDecrease", "_volumeDecrease", "handleVolumeDown",
         "_handleVolumeDown", "volumeDownButtonPressed",
         "volumeDecreaseButtonPressed", "performVolumeDown", "_performVolumeDown",
+        "volumeDecreasePressDown", "_volumeDecreasePressDown",
+        "volumeDownPressDown", "_volumeDownPressDown",
     };
     const char *deltaSelectors[] = {
         "_changeVolumeByDelta:", "changeVolumeByDelta:",

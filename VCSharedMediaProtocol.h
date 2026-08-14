@@ -176,6 +176,31 @@ static inline int VCSharedTimestampIsRecent(uint64_t nowMilliseconds,
     return nowMilliseconds - timestampMilliseconds <= maximumAgeMilliseconds;
 }
 
+/// Resolves shared-frame freshness in the consumer's own monotonic clock
+/// domain. Some iOS 15 notifyd paths can expose a valid generation/IOSurface
+/// pair while the separately mirrored producer timestamp is zero, ahead of the
+/// reader, or temporarily stuck. A locally observed generation or changing
+/// producer-runtime heartbeat is authoritative evidence that publication is
+/// active; otherwise the newest sane timestamp is allowed to age normally.
+static inline uint64_t VCResolveConsumerFrameTimestamp(
+    uint64_t nowMilliseconds,
+    uint64_t producerTimestampMilliseconds,
+    uint64_t locallyObservedMilliseconds,
+    int producerPublicationActive) {
+    if (nowMilliseconds == 0) return 0;
+    if (producerPublicationActive) return nowMilliseconds;
+    uint64_t resolved = 0;
+    if (producerTimestampMilliseconds > 0 &&
+        producerTimestampMilliseconds <= nowMilliseconds) {
+        resolved = producerTimestampMilliseconds;
+    }
+    if (locallyObservedMilliseconds > resolved &&
+        locallyObservedMilliseconds <= nowMilliseconds) {
+        resolved = locallyObservedMilliseconds;
+    }
+    return resolved;
+}
+
 static inline size_t VCAudioRingFrameIndex(uint64_t absoluteFrame,
                                            uint32_t capacityFrames) {
     return capacityFrames == 0 ? 0 : (size_t)(absoluteFrame % capacityFrames);
