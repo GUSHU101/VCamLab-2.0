@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.24.0 - 2026-08-15
+
+- Added a redundant zero-copy video discovery path for iOS 15.8.8. SpringBoard now mirrors the current global IOSurface ID, generation and monotonic timestamp through persistent Darwin notify state, so mediaserverd and application fallbacks can consume the frame even when the tiny control IOSurface cannot be mapped across the sandbox boundary.
+- Made control-IOSurface creation optional and rate-limited failed allocation retries to once per five seconds. A control-plane failure no longer turns a valid source into a dropped frame or causes allocation work on every 60 FPS producer callback.
+- Added thread-local shared-video failure codes for missing direct/control state, stale publication, frame IOSurface lookup, CoreVideo wrapping and generation races. System and application runtime stages now carry the exact failure reason instead of reporting only “shared source unavailable”.
+- Added a dedicated `sharedVideoBus` live status/diagnostic row that reports whether SpringBoard published both discovery channels, direct fallback only, control only, or a concrete producer failure.
+- Rebuilt the SpringBoard volume-key integration around an ABI-validated multi-entry dispatch table. It scans known iOS 15 classes plus loaded volume-related classes, covers no-argument actions, hardware `PressDownWithModifiers:` entries and both float/double delta selectors, resolves inherited implementations to their declaring class and preserves original behavior whenever local-media playlist control declines the event.
+- Kept bounded startup scans followed by low-frequency rescans for volume classes loaded late, and expanded the status channel to report scan completion plus directional/delta hook counts.
+- Extended portable protocol tests and repository validation for the redundant video bus, failure telemetry, control retry backoff, volume-hook status packing, dynamic class scanning and new Settings status row.
+
 ## 2.23.0 - 2026-08-15
 
 - Fixed the iOS 15.8.8 mediaserverd compatibility scan so `BWNodeOutput` can be hooked when `emitSampleBuffer:` is inherited instead of declared directly. Direct subclass overrides remain hooked once, without repeatedly wrapping the same inherited implementation.

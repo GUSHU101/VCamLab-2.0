@@ -5,7 +5,7 @@
 
 VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/麦克风插件。SpringBoard 进程只生成一份媒体流，`mediaserverd` 在 `CMCapture` 相机媒体图的 `BWNodeOutput` 处替换真实 `CMSampleBuffer`；照片、录像、视频通话、WebRTC 与扫码等下游因此读取同一份替换样本，而不是在界面上覆盖一层图片。
 
-当前版本：`2.23.0`
+当前版本：`2.24.0`
 
 > 正式 `.deb` 由 GitHub Actions 从当前提交构建并作为 `VirtualCamPro-rootless` artifact 发布；不要混用历史 2.8.0 二进制。
 
@@ -15,14 +15,14 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - 系统相机图替换：`mediaserverd` 在所有可识别的 `BWNodeOutput` 颜色/PCM 节点替换真实样本；压缩辅助流、深度、视差和元数据始终透传。
 - 逐样本自动回退：系统 Hook 给实际替换成功的 sample/pixel buffer 写可传播证据；应用内 `AVCaptureVideoDataOutput` 和音频输出只旁路该具体样本，预览与照片不会再被其他 CaptureSession 的全局心跳误关闭。限频健康状态仅用于诊断，不再决定正确性。
 - 连续本地音频：每个系统节点和应用输出拥有独立 PCM 游标、约 30 ms 抗抖储备及带相位/前视样本的连续重采样上下文，多 CaptureSession 不会互相抢读或在 44.1/48 kHz 回调边界跳样。
-- 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface，并通过一块常驻控制 IOSurface 原子发布帧代次、Surface ID 与时间戳；Darwin notify 只负责控制块建立/失效事件，消费者映射同一物理内存，不复制、序列化或逐帧查询通知状态。
+- 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface；常驻控制 IOSurface 与 Darwin notify 直连状态构成冗余发现通道，消费者映射同一物理内存，不复制或序列化帧。iOS 15 沙箱无法映射控制面时会自动走直连元数据，不再把“生产者稳定产帧”误当成“消费者已可见”。
 - 本地媒体：MP4/MOV 等视频可同时替换摄像头和麦克风；纯 MP3/M4A 只替换麦克风，画面继续使用物理摄像头。
 - 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”批量选择视频/音频，或从“照片”一次选择多段视频；无需手工输入路径。导入时会从文件内容类型补齐提供器临时文件缺失/错误的媒体后缀，并在同一个 30 秒预算内用全新的 `AVURLAsset` 对瞬时空轨道结果重试一次。方向/尺寸只在首次播放前准备并供循环复用，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
 - 屏幕镜像：SpringBoard 通过 CoreAnimation 直接渲染到 IOSurface，再交给系统相机管线。
 - HLS：URL 中包含 `.m3u8` 时使用 `AVPlayerItemVideoOutput` 解码；轮询频率按发送端 nominal FPS 自适应，不再让 30/60 FPS 流固定消耗 240 Hz 主线程轮询。
 - MJPEG：其他 HTTP/HTTPS URL 按连续 JPEG 流解析；增量校验 JPEG 段结构、直接读取 SOF 尺寸并限制单帧与接收缓冲。优先尝试实时 VideoToolbox→IOSurface NV12 解码，不支持时自动回退 ImageIO。
 - 网络流参数透传：手机不旋转、镜像、限帧、缩略或重编码网络帧，分辨率、方向、帧率和质量由 Windows/OBS 发送端决定；网络模式不发布替换音频，始终使用手机原生麦克风。
-- 无日志运行诊断：设置页用低频进程心跳排除历史 notify 假状态，并直接显示 SpringBoard、mediaserverd Hook/取帧/转换/替换以及真实 AVFoundation 代理/预览/照片回退活动；切回设置后仍可复制最后阶段和发生时间，普通 UIKit 进程启动不会覆盖相机证据。
+- 无日志运行诊断：设置页用低频进程心跳排除历史 notify 假状态，并直接显示 SpringBoard 共享视频总线、mediaserverd Hook/取帧/转换/替换以及真实 AVFoundation 代理/预览/照片回退活动；共享读取失败会细分到控制面、直连状态、帧 IOSurface 查找、包装和发布竞争，切回设置后仍可复制最后阶段和发生时间。
 - 运行状态与恢复：设置页直接显示 SpringBoard 来源产帧状态、mediaserverd 系统视频接管状态和应用回退状态，并可在不改变任何来源参数的情况下原子重载当前生产者。
 - 来源故障隔离：屏幕、本地文件和网络来源的错误/完成回调都绑定当前 generation；切换后迟到的旧回调不能覆盖新来源状态。非循环本地媒体自然结束时会立即清空共享 PCM、恢复原生麦克风，并在控制面板显示“播放完成”。
 - 手机控制面板：以 iOS 15 原生 PreferenceLoader 行作为稳定主界面；页面完全出现后才刷新只读状态，离开设置立即停表。若私有 Preferences.framework 行刷新发生异常，会自动停用动态刷新并保留静态设置功能，不再拖垮 Settings。来源操作指引、本地媒体库容量/文件清单、缺失文件提示和脱敏诊断复制仍集中在同一页面。

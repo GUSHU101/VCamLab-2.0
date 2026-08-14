@@ -239,6 +239,12 @@
         </dict>
         <dict>
             <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>共享视频总线</string>
+            <key>get</key><string>currentSharedVideoBusStatus:</string>
+            <key>vcLiveStatus</key><true/>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
             <key>label</key><string>系统视频管线</string>
             <key>get</key><string>currentSystemVideoPipelineStatus:</string>
             <key>vcLiveStatus</key><true/>

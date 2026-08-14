@@ -33,6 +33,7 @@ typedef NS_ENUM(NSUInteger, VCPNotifyChannel) {
     VCPNotifyChannelMediaServerRuntime,
     VCPNotifyChannelMediaServerVideoRuntime,
     VCPNotifyChannelApplicationVideoRuntime,
+    VCPNotifyChannelProducerVideoRuntime,
     VCPNotifyChannelCount,
 };
 
@@ -53,6 +54,8 @@ static const char *VCPNotifyChannelNames[VCPNotifyChannelCount] = {
         "com.murkaska.virtualcampro/runtime.mediaserverd.video.v1",
     [VCPNotifyChannelApplicationVideoRuntime] =
         "com.murkaska.virtualcampro/runtime.application.video.v1",
+    [VCPNotifyChannelProducerVideoRuntime] =
+        "com.murkaska.virtualcampro/runtime.springboard.video.v1",
 };
 
 static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
@@ -84,6 +87,31 @@ static NSString *VCPRuntimeHeartbeatDescription(VCPNotifyChannel channel,
     return [NSString stringWithFormat:@"%@ 存活（%@ ms）", processName, @(age)];
 }
 
+static NSString *VCPSharedVideoFailureDescription(uint8_t detail) {
+    switch ((VCSharedVideoFailureReason)detail) {
+        case VCSharedVideoFailureControlStateUnavailable:
+            return @"控制通道状态不可读";
+        case VCSharedVideoFailureControlSurfaceLookup:
+            return @"控制 IOSurface 映射失败";
+        case VCSharedVideoFailureControlSurfaceInvalid:
+            return @"控制 IOSurface 内容无效";
+        case VCSharedVideoFailureDirectStateUnavailable:
+            return @"直接帧状态与控制通道均不可用";
+        case VCSharedVideoFailureNoPublishedFrame:
+            return @"生产者尚未发布共享帧";
+        case VCSharedVideoFailureFrameStale:
+            return @"共享帧已过期";
+        case VCSharedVideoFailureFrameSurfaceLookup:
+            return @"帧 IOSurface 跨进程映射失败";
+        case VCSharedVideoFailurePixelBufferWrap:
+            return @"IOSurface 无法包装为像素缓冲";
+        case VCSharedVideoFailurePublicationRace:
+            return @"连续发布竞争，安全重试耗尽";
+        default:
+            return @"未提供底层失败码";
+    }
+}
+
 static NSString *VCPMediaServerVideoRuntimeDescription(uint64_t state) {
     VCMediaServerVideoRuntimeEvent event =
         (VCMediaServerVideoRuntimeEvent)VCEventFromRuntimeState(state);
@@ -112,8 +140,10 @@ static NSString *VCPMediaServerVideoRuntimeDescription(uint64_t state) {
         case VCMediaServerVideoRuntimeSampleObserved:
             return [NSString stringWithFormat:@"已收到系统相机视频样本（%@）", ageText];
         case VCMediaServerVideoRuntimeSourceUnavailable:
-            return [NSString stringWithFormat:@"相机样本已到达，但共享来源不可见（%@）",
-                                              ageText];
+            return [NSString stringWithFormat:
+                @"相机样本已到达，但共享来源不可见：%@（%@）",
+                VCPSharedVideoFailureDescription(detail),
+                ageText];
         case VCMediaServerVideoRuntimeUnsupportedPixelFormat:
             return [NSString stringWithFormat:@"相机像素格式暂不支持（%@）", ageText];
         case VCMediaServerVideoRuntimeConversionFailed:
@@ -160,8 +190,10 @@ static NSString *VCPApplicationVideoRuntimeDescription(uint64_t state) {
         case VCApplicationVideoRuntimeSystemReplacementObserved:
             return [NSString stringWithFormat:@"应用已收到系统替换样本（%@）", ageText];
         case VCApplicationVideoRuntimeSourceUnavailable:
-            return [NSString stringWithFormat:@"视频回调已到达，但共享来源不可见（%@）",
-                                              ageText];
+            return [NSString stringWithFormat:
+                @"视频回调已到达，但共享来源不可见：%@（%@）",
+                VCPSharedVideoFailureDescription(VCDetailFromRuntimeState(state)),
+                ageText];
         case VCApplicationVideoRuntimeConversionFailed:
             return [NSString stringWithFormat:@"应用内视频转换失败（%@）", ageText];
         case VCApplicationVideoRuntimeReplacementSucceeded:
@@ -169,7 +201,10 @@ static NSString *VCPApplicationVideoRuntimeDescription(uint64_t state) {
         case VCApplicationVideoRuntimePreviewOverlayInstalled:
             return [NSString stringWithFormat:@"预览替换层已安装（%@）", ageText];
         case VCApplicationVideoRuntimePreviewSourceUnavailable:
-            return [NSString stringWithFormat:@"预览层运行中，但替换帧不可见（%@）", ageText];
+            return [NSString stringWithFormat:@"预览层运行中，但替换帧不可见：%@（%@）",
+                                              VCPSharedVideoFailureDescription(
+                                                  VCDetailFromRuntimeState(state)),
+                                              ageText];
         case VCApplicationVideoRuntimePreviewFrameDisplayed:
             return [NSString stringWithFormat:@"应用预览已显示替换帧（%@）", ageText];
         case VCApplicationVideoRuntimePhotoReplacementSucceeded:
@@ -178,6 +213,38 @@ static NSString *VCPApplicationVideoRuntimeDescription(uint64_t state) {
             return [NSString stringWithFormat:@"照片替换失败，已保留原照片（%@）", ageText];
         default:
             return @"尚无应用内 AVFoundation Hook 活动；请先打开一次相机应用";
+    }
+}
+
+static NSString *VCPProducerVideoRuntimeDescription(uint64_t state) {
+    VCProducerVideoRuntimeEvent event =
+        (VCProducerVideoRuntimeEvent)VCEventFromRuntimeState(state);
+    uint64_t age = UINT64_MAX;
+    NSString *ageText = VCPRuntimeTimestampAge(VCTimestampFromRuntimeState(state),
+                                               &age)
+        ? [NSString stringWithFormat:@"%@ ms 前", @(age)]
+        : @"时间不可用";
+    switch (event) {
+        case VCProducerVideoRuntimeNoIOSurface:
+            return [NSString stringWithFormat:@"产出帧没有 IOSurface（%@）", ageText];
+        case VCProducerVideoRuntimeSurfaceIDUnavailable:
+            return [NSString stringWithFormat:@"产出帧没有全局 Surface ID（%@）", ageText];
+        case VCProducerVideoRuntimeControlSurfaceUnavailable:
+            return [NSString stringWithFormat:@"控制 IOSurface 创建失败（%@）", ageText];
+        case VCProducerVideoRuntimeControlStatePublishFailed:
+            return [NSString stringWithFormat:@"控制状态发布失败（%@）", ageText];
+        case VCProducerVideoRuntimeDirectStatePublishFailed:
+            return [NSString stringWithFormat:@"直接帧状态发布失败（%@）", ageText];
+        case VCProducerVideoRuntimePublishedControlAndDirect:
+            return [NSString stringWithFormat:@"控制面与直接帧通道均已发布（%@）", ageText];
+        case VCProducerVideoRuntimePublishedDirectFallback:
+            return [NSString stringWithFormat:@"直接帧通道已发布，控制面不可用（%@）",
+                                              ageText];
+        case VCProducerVideoRuntimePublishedControlOnly:
+            return [NSString stringWithFormat:@"控制面已发布，直接冗余通道失败（%@）",
+                                              ageText];
+        default:
+            return @"尚无 SpringBoard 共享视频发布状态";
     }
 }
 
@@ -727,6 +794,7 @@ static BOOL VCPRepairStoredPreferences(void) {
 - (id)currentLocalMediaName:(PSSpecifier *)specifier;
 - (id)currentLocalMediaLibrarySummary:(PSSpecifier *)specifier;
 - (id)currentSourceRuntimeStatus:(PSSpecifier *)specifier;
+- (id)currentSharedVideoBusStatus:(PSSpecifier *)specifier;
 - (id)currentSystemVideoPipelineStatus:(PSSpecifier *)specifier;
 - (id)currentApplicationFallbackStatus:(PSSpecifier *)specifier;
 - (id)currentLocalTransformStatus:(PSSpecifier *)specifier;
@@ -1120,11 +1188,20 @@ static BOOL VCPRepairStoredPreferences(void) {
     if (!VCPGetNotifyChannelState(VCPNotifyChannelLocalVolumeHook, &state)) {
         return @"SpringBoard 状态不可用";
     }
-    if (!(state & 1ULL)) return @"未安装，保留系统音量";
-    BOOL buttons = (state & (1ULL << 1)) != 0;
-    BOOL delta = (state & (1ULL << 2)) != 0;
-    if (buttons && delta) return @"已安装：按键 + 增量双路径";
-    return buttons ? @"已安装：音量按键路径" : @"已安装：音量增量路径";
+    BOOL installed = (state & VC_VOLUME_HOOK_STATUS_INSTALLED) != 0;
+    BOOL buttons = (state & VC_VOLUME_HOOK_STATUS_BUTTON_PAIR) != 0;
+    BOOL delta = (state & VC_VOLUME_HOOK_STATUS_DELTA) != 0;
+    BOOL scanComplete = (state & VC_VOLUME_HOOK_STATUS_SCAN_COMPLETE) != 0;
+    uint8_t directionalCount = VCDirectionalHookCountFromStatus(state);
+    uint8_t deltaCount = VCDeltaHookCountFromStatus(state);
+    if (!installed) {
+        return scanComplete ? @"已扫描，未找到兼容入口；保留系统音量"
+                            : @"正在扫描 SpringBoard 音量入口";
+    }
+    NSString *route = buttons && delta ? @"按键 + 增量"
+        : (buttons ? @"音量按键" : (delta ? @"音量增量" : @"部分按键"));
+    return [NSString stringWithFormat:@"已安装：%@（方向 %u · 增量 %u）",
+            route, directionalCount, deltaCount];
 }
 
 - (id)currentSourceRuntimeStatus:(PSSpecifier *)specifier {
@@ -1152,6 +1229,27 @@ static BOOL VCPRepairStoredPreferences(void) {
         case VCPStreamStatusCompleted: return @"本地媒体播放完成";
         default: return @"等待 SpringBoard 接管";
     }
+}
+
+- (id)currentSharedVideoBusStatus:(PSSpecifier *)specifier {
+    [self synchronizePreferencesIfNeeded:NO];
+    id enabledValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
+    if (!VCPReadBooleanPreference(enabledValue, NO)) return @"已停用";
+    uint64_t heartbeat = 0;
+    uint64_t heartbeatAge = UINT64_MAX;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelSpringBoardRuntime,
+                                  &heartbeat) ||
+        !VCPRuntimeTimestampAge(heartbeat, &heartbeatAge) ||
+        heartbeatAge > VC_RUNTIME_HEARTBEAT_MAX_AGE_MS) {
+        return @"SpringBoard 无存活信号，发布状态已忽略";
+    }
+    uint64_t runtimeState = 0;
+    if (!VCPGetNotifyChannelState(VCPNotifyChannelProducerVideoRuntime,
+                                  &runtimeState) || runtimeState == 0) {
+        return @"SpringBoard 存活，但尚未报告共享视频发布";
+    }
+    return VCPProducerVideoRuntimeDescription(runtimeState);
 }
 
 - (id)currentSystemVideoPipelineStatus:(PSSpecifier *)specifier {
@@ -1308,6 +1406,7 @@ static BOOL VCPRepairStoredPreferences(void) {
          "enabled=%@\n"
          "source=%@\n"
          "sourceStatus=%@\n"
+         "sharedVideoBus=%@\n"
          "springBoardRuntime=%@\n"
          "mediaServerRuntime=%@\n"
          "systemVideoPipeline=%@\n"
@@ -1327,6 +1426,7 @@ static BOOL VCPRepairStoredPreferences(void) {
         enabled ? @"yes" : @"no",
         [self currentSourceConfigurationSummary:nil],
         [self currentSourceRuntimeStatus:nil],
+        [self currentSharedVideoBusStatus:nil],
         VCPRuntimeHeartbeatDescription(VCPNotifyChannelSpringBoardRuntime,
                                        @"SpringBoard"),
         VCPRuntimeHeartbeatDescription(VCPNotifyChannelMediaServerRuntime,

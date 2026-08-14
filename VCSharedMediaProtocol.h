@@ -22,6 +22,10 @@
 #define VC_PIPELINE_HEARTBEAT_MIN_INTERVAL_MS 250u
 #define VC_RUNTIME_HEARTBEAT_MAX_AGE_MS 6000u
 #define VC_RUNTIME_EVENT_TIMESTAMP_MASK UINT64_C(0x0000ffffffffffff)
+#define VC_VOLUME_HOOK_STATUS_INSTALLED (UINT64_C(1) << 0)
+#define VC_VOLUME_HOOK_STATUS_BUTTON_PAIR (UINT64_C(1) << 1)
+#define VC_VOLUME_HOOK_STATUS_DELTA (UINT64_C(1) << 2)
+#define VC_VOLUME_HOOK_STATUS_SCAN_COMPLETE (UINT64_C(1) << 3)
 
 typedef enum {
     VCMediaServerVideoRuntimeUnknown = 0,
@@ -52,6 +56,31 @@ typedef enum {
     VCApplicationVideoRuntimePhotoReplacementSucceeded = 10,
     VCApplicationVideoRuntimePhotoReplacementFailed = 11,
 } VCApplicationVideoRuntimeEvent;
+
+typedef enum {
+    VCSharedVideoFailureNone = 0,
+    VCSharedVideoFailureControlStateUnavailable = 1,
+    VCSharedVideoFailureControlSurfaceLookup = 2,
+    VCSharedVideoFailureControlSurfaceInvalid = 3,
+    VCSharedVideoFailureDirectStateUnavailable = 4,
+    VCSharedVideoFailureNoPublishedFrame = 5,
+    VCSharedVideoFailureFrameStale = 6,
+    VCSharedVideoFailureFrameSurfaceLookup = 7,
+    VCSharedVideoFailurePixelBufferWrap = 8,
+    VCSharedVideoFailurePublicationRace = 9,
+} VCSharedVideoFailureReason;
+
+typedef enum {
+    VCProducerVideoRuntimeUnknown = 0,
+    VCProducerVideoRuntimeNoIOSurface = 1,
+    VCProducerVideoRuntimeSurfaceIDUnavailable = 2,
+    VCProducerVideoRuntimeControlSurfaceUnavailable = 3,
+    VCProducerVideoRuntimeControlStatePublishFailed = 4,
+    VCProducerVideoRuntimeDirectStatePublishFailed = 5,
+    VCProducerVideoRuntimePublishedControlAndDirect = 6,
+    VCProducerVideoRuntimePublishedDirectFallback = 7,
+    VCProducerVideoRuntimePublishedControlOnly = 8,
+} VCProducerVideoRuntimeEvent;
 
 typedef struct {
     uint32_t magic;
@@ -95,6 +124,37 @@ static inline uint8_t VCDetailFromRuntimeState(uint64_t state) {
 
 static inline uint64_t VCTimestampFromRuntimeState(uint64_t state) {
     return state & VC_RUNTIME_EVENT_TIMESTAMP_MASK;
+}
+
+/// SpringBoard volume-hook diagnostics use a compact, backwards-compatible
+/// bit field. The low nibble preserves the original capability flags while
+/// the upper bytes expose how many ABI-validated entry points were installed.
+static inline uint64_t VCPackVolumeHookStatus(int scanComplete,
+                                              int hasVolumeUp,
+                                              int hasVolumeDown,
+                                              int hasDelta,
+                                              uint8_t directionalHookCount,
+                                              uint8_t deltaHookCount) {
+    uint64_t state = 0;
+    if (directionalHookCount > 0 || deltaHookCount > 0) {
+        state |= VC_VOLUME_HOOK_STATUS_INSTALLED;
+    }
+    if (hasVolumeUp && hasVolumeDown) {
+        state |= VC_VOLUME_HOOK_STATUS_BUTTON_PAIR;
+    }
+    if (hasDelta) state |= VC_VOLUME_HOOK_STATUS_DELTA;
+    if (scanComplete) state |= VC_VOLUME_HOOK_STATUS_SCAN_COMPLETE;
+    state |= (uint64_t)directionalHookCount << 8;
+    state |= (uint64_t)deltaHookCount << 16;
+    return state;
+}
+
+static inline uint8_t VCDirectionalHookCountFromStatus(uint64_t state) {
+    return (uint8_t)((state >> 8) & UINT8_MAX);
+}
+
+static inline uint8_t VCDeltaHookCountFromStatus(uint64_t state) {
+    return (uint8_t)((state >> 16) & UINT8_MAX);
 }
 
 /// Pipeline heartbeats are diagnostics, not an application-fallback gate. A

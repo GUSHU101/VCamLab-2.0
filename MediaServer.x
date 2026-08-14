@@ -7,6 +7,7 @@
 #import <objc/runtime.h>
 #import <stdatomic.h>
 #import <stdint.h>
+#import <stdlib.h>
 #import <substrate.h>
 #import <float.h>
 #import <math.h>
@@ -19,7 +20,27 @@
 
 typedef void (*VCEmitSampleBufferFunction)(id, SEL, CMSampleBufferRef);
 typedef void (*VCVolumeButtonFunction)(id, SEL);
-typedef void (*VCVolumeDeltaFunction)(id, SEL, CGFloat);
+typedef void (*VCVolumeIntegerFunction)(id, SEL, long long);
+typedef void (*VCVolumeFloatFunction)(id, SEL, float);
+typedef void (*VCVolumeDoubleFunction)(id, SEL, double);
+typedef enum {
+    VCVolumeHookKindDirectionalNoArgument = 1,
+    VCVolumeHookKindDirectionalInteger = 2,
+    VCVolumeHookKindDeltaFloat = 3,
+    VCVolumeHookKindDeltaDouble = 4,
+} VCVolumeHookKind;
+typedef enum {
+    VCVolumeHookShapeDirectionalNoArgument = 1,
+    VCVolumeHookShapeDirectionalInteger = 2,
+    VCVolumeHookShapeDelta = 3,
+} VCVolumeHookShape;
+typedef struct {
+    Class runtimeClass;
+    SEL selector;
+    _Atomic(IMP) original;
+    int8_t direction;
+    uint8_t kind;
+} VCVolumeHookEntry;
 typedef struct {
     Class nodeClass;
     VCEmitSampleBufferFunction original;
@@ -48,26 +69,32 @@ static dispatch_once_t VCHookUnavailableLogToken;
 static CFStringRef const VCReplacedSampleAttachmentKey =
     CFSTR(VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY);
 static char VCAudioReplacementContextAssociationKey;
-static VCVolumeButtonFunction VCOriginalIncreaseVolume = NULL;
-static VCVolumeButtonFunction VCOriginalDecreaseVolume = NULL;
-static BOOL VCIncreaseVolumeHookInstalled = NO;
-static BOOL VCDecreaseVolumeHookInstalled = NO;
-static VCVolumeDeltaFunction VCOriginalChangeVolumeByDelta = NULL;
-static BOOL VCChangeVolumeByDeltaHookInstalled = NO;
+static const NSUInteger VCMaximumVolumeHooks = 96;
+static VCVolumeHookEntry VCVolumeHookEntries[96];
+static _Atomic(uint32_t) VCVolumeHookCount = 0;
+static BOOL VCVolumeUpHookInstalled = NO;
+static BOOL VCVolumeDownHookInstalled = NO;
+static uint8_t VCVolumeDirectionalHookCount = 0;
+static uint8_t VCVolumeDeltaHookCount = 0;
+static BOOL VCVolumeHookScanComplete = NO;
 static const char *VCLocalVolumeHookStatusNotificationName =
     "com.murkaska.virtualcampro/local-volume-hook.status";
 
 static void VCInstallMediaServerHook(NSUInteger attempt);
 static void VCInstallSpringBoardVolumeHooks(NSUInteger attempt);
+static Method VCDirectInstanceMethod(Class candidate, SEL selector);
 
 static void VCPublishVolumeHookStatus(void) {
     int token = -1;
     if (notify_register_check(VCLocalVolumeHookStatusNotificationName, &token) !=
         NOTIFY_STATUS_OK) return;
-    BOOL buttonPair = VCIncreaseVolumeHookInstalled && VCDecreaseVolumeHookInstalled;
-    uint64_t state = (buttonPair || VCChangeVolumeByDeltaHookInstalled) ? 1ULL : 0ULL;
-    if (buttonPair) state |= 1ULL << 1;
-    if (VCChangeVolumeByDeltaHookInstalled) state |= 1ULL << 2;
+    uint64_t state = VCPackVolumeHookStatus(
+        VCVolumeHookScanComplete,
+        VCVolumeUpHookInstalled,
+        VCVolumeDownHookInstalled,
+        VCVolumeDeltaHookCount > 0,
+        VCVolumeDirectionalHookCount,
+        VCVolumeDeltaHookCount);
     notify_set_state(token, state);
     notify_post(VCLocalVolumeHookStatusNotificationName);
     notify_cancel(token);
@@ -80,7 +107,7 @@ static BOOL VCMethodIsVoidWithNoExplicitArguments(Method method) {
     return returnType[0] == 'v';
 }
 
-static BOOL VCMethodIsVoidWithCGFloatArgument(Method method) {
+static BOOL VCMethodIsVoidWithIntegerArgument(Method method) {
     if (!method || method_getNumberOfArguments(method) != 3) return NO;
     char returnType[16] = {0};
     char argumentType[16] = {0};
@@ -89,94 +116,308 @@ static BOOL VCMethodIsVoidWithCGFloatArgument(Method method) {
     const char *type = argumentType;
     while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' ||
            *type == 'O' || *type == 'R' || *type == 'V') type++;
-    // All supported devices are arm64/arm64e, where CGFloat is encoded as a
-    // double. Refuse an unexpected ABI instead of corrupting SpringBoard state.
-    return returnType[0] == 'v' && type[0] == 'd';
+    return returnType[0] == 'v' && (type[0] == 'q' || type[0] == 'Q');
 }
 
-static void VCSpringBoardIncreaseVolume(id object, SEL selector) {
-    if ([[VCStreamCoordinator sharedCoordinator]
-            handleLocalMediaVolumeButtonDirection:1]) return;
-    if (VCOriginalIncreaseVolume) VCOriginalIncreaseVolume(object, selector);
+static VCVolumeHookKind VCVolumeDeltaHookKindForMethod(Method method) {
+    if (!method || method_getNumberOfArguments(method) != 3) return 0;
+    char returnType[16] = {0};
+    char argumentType[16] = {0};
+    method_getReturnType(method, returnType, sizeof(returnType));
+    method_getArgumentType(method, 2, argumentType, sizeof(argumentType));
+    const char *type = argumentType;
+    while (*type == 'r' || *type == 'n' || *type == 'N' || *type == 'o' ||
+           *type == 'O' || *type == 'R' || *type == 'V') type++;
+    if (returnType[0] != 'v') return 0;
+    // iOS 15.5 declares -changeVolumeByDelta: as float, while some releases
+    // expose a double/CGFloat variant. Each width needs a distinct trampoline.
+    if (type[0] == 'f') return VCVolumeHookKindDeltaFloat;
+    if (type[0] == 'd') return VCVolumeHookKindDeltaDouble;
+    return 0;
 }
 
-static void VCSpringBoardDecreaseVolume(id object, SEL selector) {
-    if ([[VCStreamCoordinator sharedCoordinator]
-            handleLocalMediaVolumeButtonDirection:-1]) return;
-    if (VCOriginalDecreaseVolume) VCOriginalDecreaseVolume(object, selector);
-}
-
-static void VCSpringBoardChangeVolumeByDelta(id object, SEL selector, CGFloat delta) {
-    if (isfinite(delta) && fabs(delta) > DBL_EPSILON &&
-        [[VCStreamCoordinator sharedCoordinator]
-            handleLocalMediaVolumeButtonDirection:delta > 0.0 ? 1 : -1]) return;
-    if (VCOriginalChangeVolumeByDelta) {
-        VCOriginalChangeVolumeByDelta(object, selector, delta);
+static VCVolumeHookEntry *VCVolumeEntryForInvocation(id object, SEL selector) {
+    if (!object || !selector) return NULL;
+    uint32_t count = atomic_load_explicit(&VCVolumeHookCount, memory_order_acquire);
+    for (Class current = object_getClass(object); current;
+         current = class_getSuperclass(current)) {
+        for (uint32_t index = 0; index < count; index++) {
+            VCVolumeHookEntry *entry = &VCVolumeHookEntries[index];
+            if (entry->runtimeClass == current && entry->selector == selector) {
+                return entry;
+            }
+        }
     }
+    return NULL;
+}
+
+static void VCSpringBoardVolumeButton(id object, SEL selector) {
+    VCVolumeHookEntry *entry = VCVolumeEntryForInvocation(object, selector);
+    int direction = entry ? entry->direction : 0;
+    if (direction != 0 && [[VCStreamCoordinator sharedCoordinator]
+            handleLocalMediaVolumeButtonDirection:direction]) return;
+    VCVolumeButtonFunction original = entry
+        ? (VCVolumeButtonFunction)atomic_load_explicit(&entry->original,
+                                                       memory_order_acquire)
+        : NULL;
+    if (original) original(object, selector);
+}
+
+static void VCSpringBoardVolumeInteger(id object,
+                                       SEL selector,
+                                       long long modifiers) {
+    VCVolumeHookEntry *entry = VCVolumeEntryForInvocation(object, selector);
+    int direction = entry ? entry->direction : 0;
+    if (direction != 0 && [[VCStreamCoordinator sharedCoordinator]
+            handleLocalMediaVolumeButtonDirection:direction]) return;
+    VCVolumeIntegerFunction original = entry
+        ? (VCVolumeIntegerFunction)atomic_load_explicit(&entry->original,
+                                                        memory_order_acquire)
+        : NULL;
+    if (original) original(object, selector, modifiers);
+}
+
+static BOOL VCConsumeVolumeDelta(double delta) {
+    return isfinite(delta) && fabs(delta) > DBL_EPSILON &&
+        [[VCStreamCoordinator sharedCoordinator]
+            handleLocalMediaVolumeButtonDirection:delta > 0.0 ? 1 : -1];
+}
+
+static void VCSpringBoardVolumeFloatDelta(id object, SEL selector, float delta) {
+    VCVolumeHookEntry *entry = VCVolumeEntryForInvocation(object, selector);
+    if (VCConsumeVolumeDelta((double)delta)) return;
+    VCVolumeFloatFunction original = entry
+        ? (VCVolumeFloatFunction)atomic_load_explicit(&entry->original,
+                                                      memory_order_acquire)
+        : NULL;
+    if (original) original(object, selector, delta);
+}
+
+static void VCSpringBoardVolumeDoubleDelta(id object, SEL selector, double delta) {
+    VCVolumeHookEntry *entry = VCVolumeEntryForInvocation(object, selector);
+    if (VCConsumeVolumeDelta(delta)) return;
+    VCVolumeDoubleFunction original = entry
+        ? (VCVolumeDoubleFunction)atomic_load_explicit(&entry->original,
+                                                       memory_order_acquire)
+        : NULL;
+    if (original) original(object, selector, delta);
+}
+
+static BOOL VCVolumeHookAlreadyInstalled(Class runtimeClass, SEL selector) {
+    uint32_t count = atomic_load_explicit(&VCVolumeHookCount, memory_order_acquire);
+    for (uint32_t index = 0; index < count; index++) {
+        VCVolumeHookEntry *entry = &VCVolumeHookEntries[index];
+        if (entry->runtimeClass == runtimeClass && entry->selector == selector) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static BOOL VCInstallVolumeHook(Class runtimeClass,
+                                SEL selector,
+                                VCVolumeHookShape shape,
+                                int direction,
+                                BOOL allowInheritedMethod) {
+    if (!runtimeClass || !selector) return NO;
+    Class hookClass = runtimeClass;
+    Method method = VCDirectInstanceMethod(hookClass, selector);
+    if (allowInheritedMethod) {
+        while (!method && hookClass) {
+            hookClass = class_getSuperclass(hookClass);
+            method = hookClass ? VCDirectInstanceMethod(hookClass, selector) : NULL;
+        }
+    }
+    if (!hookClass || VCVolumeHookAlreadyInstalled(hookClass, selector)) return NO;
+    VCVolumeHookKind kind = 0;
+    if (shape == VCVolumeHookShapeDirectionalNoArgument &&
+        VCMethodIsVoidWithNoExplicitArguments(method)) {
+        kind = VCVolumeHookKindDirectionalNoArgument;
+    } else if (shape == VCVolumeHookShapeDirectionalInteger &&
+               VCMethodIsVoidWithIntegerArgument(method)) {
+        kind = VCVolumeHookKindDirectionalInteger;
+    } else if (shape == VCVolumeHookShapeDelta) {
+        kind = VCVolumeDeltaHookKindForMethod(method);
+    }
+    if (kind == 0) return NO;
+
+    uint32_t index = atomic_load_explicit(&VCVolumeHookCount, memory_order_relaxed);
+    if (index >= VCMaximumVolumeHooks) return NO;
+    VCVolumeHookEntry *entry = &VCVolumeHookEntries[index];
+    entry->runtimeClass = hookClass;
+    entry->selector = selector;
+    entry->direction = (int8_t)direction;
+    entry->kind = (uint8_t)kind;
+    atomic_store_explicit(&entry->original,
+                          method_getImplementation(method),
+                          memory_order_relaxed);
+    atomic_store_explicit(&VCVolumeHookCount, index + 1, memory_order_release);
+
+    IMP original = NULL;
+    IMP replacement = kind == VCVolumeHookKindDirectionalNoArgument
+        ? (IMP)VCSpringBoardVolumeButton
+        : (kind == VCVolumeHookKindDirectionalInteger
+            ? (IMP)VCSpringBoardVolumeInteger
+            : (kind == VCVolumeHookKindDeltaFloat
+                ? (IMP)VCSpringBoardVolumeFloatDelta
+                : (IMP)VCSpringBoardVolumeDoubleDelta));
+    MSHookMessageEx(hookClass, selector, replacement, &original);
+    if (original) {
+        atomic_store_explicit(&entry->original, original, memory_order_release);
+    }
+    if (kind == VCVolumeHookKindDeltaFloat ||
+        kind == VCVolumeHookKindDeltaDouble) {
+        if (VCVolumeDeltaHookCount < UINT8_MAX) VCVolumeDeltaHookCount++;
+    } else {
+        if (VCVolumeDirectionalHookCount < UINT8_MAX) VCVolumeDirectionalHookCount++;
+        if (direction > 0) VCVolumeUpHookInstalled = YES;
+        if (direction < 0) VCVolumeDownHookInstalled = YES;
+    }
+    return YES;
+}
+
+static int VCVolumeDirectionForSelectorName(NSString *selectorName) {
+    NSString *name = selectorName.lowercaseString;
+    if (![name containsString:@"volume"] || [name containsString:@":"] ||
+        [name containsString:@"delta"] || [name containsString:@"changed"] ||
+        [name containsString:@"notification"] || [name containsString:@"pressup"] ||
+        [name containsString:@"buttonup"] || [name containsString:@"release"] ||
+        [name containsString:@"cancel"] || [name containsString:@"send"] ||
+        [name containsString:@"log"] || [name hasPrefix:@"set"] ||
+        [name hasPrefix:@"can"] || [name hasPrefix:@"should"]) return 0;
+    if ([name containsString:@"increase"] || [name containsString:@"volumeup"] ||
+        [name containsString:@"stepup"]) return 1;
+    if ([name containsString:@"decrease"] || [name containsString:@"volumedown"] ||
+        [name containsString:@"stepdown"]) return -1;
+    return 0;
+}
+
+static BOOL VCSelectorLooksLikeVolumeDelta(NSString *selectorName) {
+    NSString *name = selectorName.lowercaseString;
+    return [name containsString:@"volume"] && [name containsString:@"delta"];
+}
+
+static void VCScanKnownVolumeClasses(void) {
+    const char *classNames[] = {
+        "SBVolumeControl",
+        "VolumeControl",
+        "SBMediaController",
+        "SBVolumeHardwareButtonActions",
+        "SBVolumeHardwareButton",
+        "SBVolumeButtonController",
+        "SBHardwareButtonService",
+    };
+    const char *upSelectors[] = {
+        "increaseVolume", "_increaseVolume", "volumeUp", "_volumeUp",
+        "volumeIncrease", "_volumeIncrease", "handleVolumeUp",
+        "_handleVolumeUp", "volumeUpButtonPressed",
+        "volumeIncreaseButtonPressed", "performVolumeUp", "_performVolumeUp",
+    };
+    const char *downSelectors[] = {
+        "decreaseVolume", "_decreaseVolume", "volumeDown", "_volumeDown",
+        "volumeDecrease", "_volumeDecrease", "handleVolumeDown",
+        "_handleVolumeDown", "volumeDownButtonPressed",
+        "volumeDecreaseButtonPressed", "performVolumeDown", "_performVolumeDown",
+    };
+    const char *deltaSelectors[] = {
+        "_changeVolumeByDelta:", "changeVolumeByDelta:",
+        "adjustVolumeByDelta:", "_adjustVolumeByDelta:",
+    };
+    const char *upIntegerSelectors[] = {
+        "volumeIncreasePressDownWithModifiers:",
+    };
+    const char *downIntegerSelectors[] = {
+        "volumeDecreasePressDownWithModifiers:",
+    };
+    for (NSUInteger classIndex = 0;
+         classIndex < sizeof(classNames) / sizeof(classNames[0]); classIndex++) {
+        Class runtimeClass = objc_getClass(classNames[classIndex]);
+        if (!runtimeClass) continue;
+        for (NSUInteger index = 0;
+             index < sizeof(upSelectors) / sizeof(upSelectors[0]); index++) {
+            VCInstallVolumeHook(runtimeClass, sel_registerName(upSelectors[index]),
+                                VCVolumeHookShapeDirectionalNoArgument, 1, YES);
+        }
+        for (NSUInteger index = 0;
+             index < sizeof(downSelectors) / sizeof(downSelectors[0]); index++) {
+            VCInstallVolumeHook(runtimeClass, sel_registerName(downSelectors[index]),
+                                VCVolumeHookShapeDirectionalNoArgument, -1, YES);
+        }
+        for (NSUInteger index = 0;
+             index < sizeof(upIntegerSelectors) / sizeof(upIntegerSelectors[0]); index++) {
+            VCInstallVolumeHook(runtimeClass,
+                                sel_registerName(upIntegerSelectors[index]),
+                                VCVolumeHookShapeDirectionalInteger, 1, YES);
+        }
+        for (NSUInteger index = 0;
+             index < sizeof(downIntegerSelectors) / sizeof(downIntegerSelectors[0]); index++) {
+            VCInstallVolumeHook(runtimeClass,
+                                sel_registerName(downIntegerSelectors[index]),
+                                VCVolumeHookShapeDirectionalInteger, -1, YES);
+        }
+        for (NSUInteger index = 0;
+             index < sizeof(deltaSelectors) / sizeof(deltaSelectors[0]); index++) {
+            VCInstallVolumeHook(runtimeClass, sel_registerName(deltaSelectors[index]),
+                                VCVolumeHookShapeDelta, 0, YES);
+        }
+    }
+}
+
+static void VCScanLoadedVolumeClasses(void) {
+    int classCount = objc_getClassList(NULL, 0);
+    if (classCount <= 0) return;
+    Class *classes = calloc((size_t)classCount, sizeof(Class));
+    if (!classes) return;
+    classCount = objc_getClassList(classes, classCount);
+    for (int classIndex = 0; classIndex < classCount; classIndex++) {
+        Class runtimeClass = classes[classIndex];
+        NSString *className = NSStringFromClass(runtimeClass).lowercaseString;
+        if (![className containsString:@"volume"]) continue;
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(runtimeClass, &methodCount);
+        for (unsigned int methodIndex = 0; methodIndex < methodCount; methodIndex++) {
+            SEL selector = method_getName(methods[methodIndex]);
+            NSString *selectorName = NSStringFromSelector(selector);
+            int direction = VCVolumeDirectionForSelectorName(selectorName);
+            if (direction != 0) {
+                VCInstallVolumeHook(runtimeClass, selector,
+                                    VCVolumeHookShapeDirectionalNoArgument,
+                                    direction, NO);
+            } else if (VCSelectorLooksLikeVolumeDelta(selectorName)) {
+                VCInstallVolumeHook(runtimeClass, selector,
+                                    VCVolumeHookShapeDelta, 0, NO);
+            }
+        }
+        free(methods);
+    }
+    free(classes);
 }
 
 static void VCInstallSpringBoardVolumeHooks(NSUInteger attempt) {
-    if (attempt == 0) VCPublishVolumeHookStatus();
-    Class volumeControlClass = objc_getClass("SBVolumeControl");
-    if (volumeControlClass) {
-        SEL increaseSelector = sel_registerName("increaseVolume");
-        SEL decreaseSelector = sel_registerName("decreaseVolume");
-        Method increaseMethod = class_getInstanceMethod(volumeControlClass, increaseSelector);
-        Method decreaseMethod = class_getInstanceMethod(volumeControlClass, decreaseSelector);
-        if (!VCIncreaseVolumeHookInstalled &&
-            VCMethodIsVoidWithNoExplicitArguments(increaseMethod)) {
-            MSHookMessageEx(volumeControlClass,
-                            increaseSelector,
-                            (IMP)VCSpringBoardIncreaseVolume,
-                            (IMP *)&VCOriginalIncreaseVolume);
-            VCIncreaseVolumeHookInstalled = VCOriginalIncreaseVolume != NULL;
-        }
-        if (!VCDecreaseVolumeHookInstalled &&
-            VCMethodIsVoidWithNoExplicitArguments(decreaseMethod)) {
-            MSHookMessageEx(volumeControlClass,
-                            decreaseSelector,
-                            (IMP)VCSpringBoardDecreaseVolume,
-                            (IMP *)&VCOriginalDecreaseVolume);
-            VCDecreaseVolumeHookInstalled = VCOriginalDecreaseVolume != NULL;
-        }
-        if (!VCChangeVolumeByDeltaHookInstalled) {
-            const char *deltaSelectorNames[] = {
-                "_changeVolumeByDelta:",
-                "changeVolumeByDelta:",
-            };
-            for (NSUInteger index = 0;
-                 index < sizeof(deltaSelectorNames) / sizeof(deltaSelectorNames[0]);
-                 index++) {
-                SEL deltaSelector = sel_registerName(deltaSelectorNames[index]);
-                Method deltaMethod = class_getInstanceMethod(volumeControlClass, deltaSelector);
-                if (!VCMethodIsVoidWithCGFloatArgument(deltaMethod)) continue;
-                MSHookMessageEx(volumeControlClass,
-                                deltaSelector,
-                                (IMP)VCSpringBoardChangeVolumeByDelta,
-                                (IMP *)&VCOriginalChangeVolumeByDelta);
-                VCChangeVolumeByDeltaHookInstalled =
-                    VCOriginalChangeVolumeByDelta != NULL;
-                if (VCChangeVolumeByDeltaHookInstalled) break;
-            }
-        }
-        if ((VCIncreaseVolumeHookInstalled && VCDecreaseVolumeHookInstalled) ||
-            VCChangeVolumeByDeltaHookInstalled) {
-            VCPublishVolumeHookStatus();
-            NSLog(@"[VirtualCamPro] SpringBoard local-playlist volume controls installed "
-                   "(buttons=%@, delta=%@)",
-                  (VCIncreaseVolumeHookInstalled && VCDecreaseVolumeHookInstalled)
-                      ? @"YES" : @"NO",
-                  VCChangeVolumeByDeltaHookInstalled ? @"YES" : @"NO");
-            return;
-        }
-    }
-    if (attempt >= 20) {
+    uint32_t previousCount = atomic_load_explicit(&VCVolumeHookCount,
+                                                   memory_order_acquire);
+    VCScanKnownVolumeClasses();
+    VCScanLoadedVolumeClasses();
+    BOOL usable = (VCVolumeUpHookInstalled && VCVolumeDownHookInstalled) ||
+        VCVolumeDeltaHookCount > 0;
+    if (usable || attempt >= 20) VCVolumeHookScanComplete = YES;
+    uint32_t currentCount = atomic_load_explicit(&VCVolumeHookCount,
+                                                  memory_order_acquire);
+    if (attempt == 0 || previousCount != currentCount || VCVolumeHookScanComplete) {
         VCPublishVolumeHookStatus();
-        NSLog(@"[VirtualCamPro] SBVolumeControl selectors unavailable; volume keeps its original behavior");
+    }
+    if (usable) {
+        NSLog(@"[VirtualCamPro] SpringBoard volume hooks installed "
+               "(directional=%u, delta=%u)",
+              VCVolumeDirectionalHookCount, VCVolumeDeltaHookCount);
         return;
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+    NSTimeInterval delay = attempt < 20 ? 0.5 : 15.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        // SpringBoard private classes can arrive after tweak initialization;
+        // continuing low-frequency scans keeps iOS 15 point releases covered.
         VCInstallSpringBoardVolumeHooks(attempt + 1);
     });
 }
@@ -352,7 +593,7 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
             if (!source) {
                 VCReportMediaServerVideoRuntimeEvent(
                     VCMediaServerVideoRuntimeSourceUnavailable,
-                    0);
+                    (uint8_t)VCSharedVideoLastFailureReason());
                 originalEmit(object, selector, originalBuffer);
                 return;
             }

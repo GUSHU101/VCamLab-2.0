@@ -38,6 +38,11 @@ typedef NS_ENUM(NSUInteger, VCSharedRuntimeProcess) {
 FOUNDATION_EXPORT void VCReleaseSharedVideoPixelBuffer(
     CVPixelBufferRef _Nullable pixelBuffer);
 
+/// Failure reason for the most recent shared-video read on the calling thread.
+/// Call immediately after a NULL result from VCStreamCoordinator.
+FOUNDATION_EXPORT VCSharedVideoFailureReason
+VCSharedVideoLastFailureReason(void);
+
 /// Canonical audio transport: interleaved Float32, 48 kHz, stereo. The storage
 /// itself is a global IOSurface ring; only the tiny control word is notified.
 @interface VCSharedAudioServer : NSObject
@@ -87,6 +92,10 @@ FOUNDATION_EXPORT void VCReportMediaServerVideoRuntimeEvent(
 /// survive switching from Camera back to Settings.
 FOUNDATION_EXPORT void VCReportApplicationVideoRuntimeEvent(
     VCApplicationVideoRuntimeEvent event,
+    uint8_t detail);
+
+FOUNDATION_EXPORT void VCReportProducerVideoRuntimeEvent(
+    VCProducerVideoRuntimeEvent event,
     uint8_t detail);
 
 NS_ASSUME_NONNULL_END

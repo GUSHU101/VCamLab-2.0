@@ -47,6 +47,24 @@ static void testRuntimeEventStateRoundTrip(void) {
     assert(VCTimestampFromRuntimeState(state) == 42);
 }
 
+static void testVolumeHookStatusRoundTrip(void) {
+    uint64_t state = VCPackVolumeHookStatus(1, 1, 1, 1, 17, 3);
+    assert((state & VC_VOLUME_HOOK_STATUS_INSTALLED) != 0);
+    assert((state & VC_VOLUME_HOOK_STATUS_BUTTON_PAIR) != 0);
+    assert((state & VC_VOLUME_HOOK_STATUS_DELTA) != 0);
+    assert((state & VC_VOLUME_HOOK_STATUS_SCAN_COMPLETE) != 0);
+    assert(VCDirectionalHookCountFromStatus(state) == 17);
+    assert(VCDeltaHookCountFromStatus(state) == 3);
+
+    state = VCPackVolumeHookStatus(1, 1, 0, 0, 1, 0);
+    assert((state & VC_VOLUME_HOOK_STATUS_INSTALLED) != 0);
+    assert((state & VC_VOLUME_HOOK_STATUS_BUTTON_PAIR) == 0);
+    assert((state & VC_VOLUME_HOOK_STATUS_SCAN_COMPLETE) != 0);
+
+    state = VCPackVolumeHookStatus(0, 0, 0, 0, 0, 0);
+    assert(state == 0);
+}
+
 static void testSharedTimestampFreshness(void) {
     assert(VCSharedTimestampIsRecent(5000, 4900, 100));
     assert(!VCSharedTimestampIsRecent(5001, 4900, 100));
@@ -130,6 +148,7 @@ int main(void) {
     testSurfaceStateRoundTrip();
     testPipelineHeartbeatRateLimit();
     testRuntimeEventStateRoundTrip();
+    testVolumeHookStatusRoundTrip();
     testSharedTimestampFreshness();
     testVideoControlAtomicLayout();
     testAudioRingWrap();

@@ -16,6 +16,9 @@ typedef NS_ENUM(NSUInteger, VCNotifyChannel) {
     VCNotifyChannelMediaServerRuntimeHeartbeat,
     VCNotifyChannelMediaServerVideoRuntime,
     VCNotifyChannelApplicationVideoRuntime,
+    VCNotifyChannelProducerVideoRuntime,
+    VCNotifyChannelVideoDirectState,
+    VCNotifyChannelVideoDirectTimestamp,
     VCNotifyChannelCount,
 };
 
@@ -36,6 +39,12 @@ static const char *VCNotifyChannelNames[VCNotifyChannelCount] = {
         "com.murkaska.virtualcampro/runtime.mediaserverd.video.v1",
     [VCNotifyChannelApplicationVideoRuntime] =
         "com.murkaska.virtualcampro/runtime.application.video.v1",
+    [VCNotifyChannelProducerVideoRuntime] =
+        "com.murkaska.virtualcampro/runtime.springboard.video.v1",
+    [VCNotifyChannelVideoDirectState] =
+        "com.murkaska.virtualcampro/media.video.direct-state.v1",
+    [VCNotifyChannelVideoDirectTimestamp] =
+        "com.murkaska.virtualcampro/media.video.direct-timestamp.v1",
 };
 
 typedef struct {
@@ -190,6 +199,7 @@ static BOOL VCRuntimeEventNeedsImmediateTransition(VCNotifyChannel channel,
             event == VCApplicationVideoRuntimePhotoReplacementSucceeded ||
             event == VCApplicationVideoRuntimePhotoReplacementFailed;
     }
+    if (channel == VCNotifyChannelProducerVideoRuntime) return YES;
     return NO;
 }
 
@@ -242,6 +252,28 @@ void VCReportApplicationVideoRuntimeEvent(
                          &lastRuntimeState);
 }
 
+void VCReportProducerVideoRuntimeEvent(
+    VCProducerVideoRuntimeEvent event,
+    uint8_t detail) {
+    static _Atomic(uint64_t) lastRuntimeState = 0;
+    VCReportRuntimeEvent(VCNotifyChannelProducerVideoRuntime,
+                         (uint8_t)event,
+                         detail,
+                         &lastRuntimeState);
+}
+
+static _Thread_local VCSharedVideoFailureReason
+    VCThreadSharedVideoFailureReason = VCSharedVideoFailureNone;
+
+static void VCSetSharedVideoFailureReason(
+    VCSharedVideoFailureReason reason) {
+    VCThreadSharedVideoFailureReason = reason;
+}
+
+VCSharedVideoFailureReason VCSharedVideoLastFailureReason(void) {
+    return VCThreadSharedVideoFailureReason;
+}
+
 @interface VCSharedVideoServer () {
     os_unfair_lock _lock;
     CVPixelBufferRef _surfaceRing[VC_SHARED_VIDEO_RING_SIZE];
@@ -250,6 +282,7 @@ void VCReportApplicationVideoRuntimeEvent(
     IOSurfaceRef _controlSurface;
     VCSharedVideoControl *_control;
     BOOL _controlStatePublished;
+    uint64_t _controlRetryAfterMilliseconds;
 }
 @end
 
@@ -273,6 +306,9 @@ void VCReportApplicationVideoRuntimeEvent(
 
 - (BOOL)ensureControlSurfaceLocked {
     if (_controlSurface && _control) return YES;
+    uint64_t now = VCMonotonicMilliseconds();
+    if (_controlRetryAfterMilliseconds != 0 &&
+        now < _controlRetryAfterMilliseconds) return NO;
     size_t byteCount = sizeof(VCSharedVideoControl);
     NSDictionary *properties = @{
         (id)kIOSurfaceWidth: @(byteCount),
@@ -283,7 +319,10 @@ void VCReportApplicationVideoRuntimeEvent(
         (id)kIOSurfaceIsGlobal: @YES,
     };
     IOSurfaceRef created = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
-    if (!created) return NO;
+    if (!created) {
+        _controlRetryAfterMilliseconds = now + 5000;
+        return NO;
+    }
     IOSurfaceLock(created, 0, NULL);
     VCSharedVideoControl *control =
         (VCSharedVideoControl *)IOSurfaceGetBaseAddress(created);
@@ -297,15 +336,18 @@ void VCReportApplicationVideoRuntimeEvent(
     IOSurfaceUnlock(created, 0, NULL);
     if (!control) {
         CFRelease(created);
+        _controlRetryAfterMilliseconds = now + 5000;
         return NO;
     }
     if (IOSurfaceGetID(created) == 0) {
         CFRelease(created);
+        _controlRetryAfterMilliseconds = now + 5000;
         return NO;
     }
     _controlSurface = created;
     _control = control;
     _controlStatePublished = NO;
+    _controlRetryAfterMilliseconds = 0;
     return YES;
 }
 
@@ -313,43 +355,52 @@ void VCReportApplicationVideoRuntimeEvent(
     if (!pixelBuffer) return NO;
     IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixelBuffer);
     if (!surface) {
+        VCReportProducerVideoRuntimeEvent(
+            VCProducerVideoRuntimeNoIOSurface,
+            0);
         NSLog(@"[VirtualCamPro] Producer returned a non-IOSurface video frame; dropping it");
         return NO;
     }
 
     IOSurfaceID surfaceID = IOSurfaceGetID(surface);
-    if (surfaceID == 0) return NO;
+    if (surfaceID == 0) {
+        VCReportProducerVideoRuntimeEvent(
+            VCProducerVideoRuntimeSurfaceIDUnavailable,
+            0);
+        return NO;
+    }
     CVPixelBufferRef retained = CVPixelBufferRetain(pixelBuffer);
     CVPixelBufferRef retired = NULL;
     uint32_t generation = 0;
     uint64_t now = VCMonotonicMilliseconds();
     IOSurfaceID controlSurfaceID = 0;
     BOOL controlStateDue = NO;
+    BOOL controlAvailable = NO;
+    uint64_t state = 0;
 
     os_unfair_lock_lock(&_lock);
-    if (![self ensureControlSurfaceLocked]) {
-        os_unfair_lock_unlock(&_lock);
-        CVPixelBufferRelease(retained);
-        return NO;
-    }
+    controlAvailable = [self ensureControlSurfaceLocked];
     NSUInteger slot = _ringIndex++ % VC_SHARED_VIDEO_RING_SIZE;
     retired = _surfaceRing[slot];
     _surfaceRing[slot] = retained;
     generation = ++_generation;
     if (generation == 0) generation = ++_generation;
-    uint64_t state = VCPackSurfaceState(generation, surfaceID);
-    atomic_store_explicit(&_control->timestampMilliseconds,
-                          now,
-                          memory_order_relaxed);
-    atomic_store_explicit(&_control->surfaceState, state, memory_order_release);
-    controlSurfaceID = IOSurfaceGetID(_controlSurface);
-    controlStateDue = !_controlStatePublished;
+    state = VCPackSurfaceState(generation, surfaceID);
+    if (controlAvailable) {
+        atomic_store_explicit(&_control->timestampMilliseconds,
+                              now,
+                              memory_order_relaxed);
+        atomic_store_explicit(&_control->surfaceState, state, memory_order_release);
+        controlSurfaceID = IOSurfaceGetID(_controlSurface);
+        controlStateDue = !_controlStatePublished;
+    }
     os_unfair_lock_unlock(&_lock);
 
-    BOOL controlStatePublished = !controlStateDue ||
-        VCNotifyWriteState(VCNotifyChannelVideoControl,
-                           (uint64_t)controlSurfaceID,
-                           YES);
+    BOOL controlStatePublished = controlAvailable &&
+        (!controlStateDue ||
+         VCNotifyWriteState(VCNotifyChannelVideoControl,
+                            (uint64_t)controlSurfaceID,
+                            YES));
     if (controlStateDue && controlStatePublished) {
         os_unfair_lock_lock(&_lock);
         if (_controlSurface && IOSurfaceGetID(_controlSurface) == controlSurfaceID) {
@@ -357,8 +408,40 @@ void VCReportApplicationVideoRuntimeEvent(
         }
         os_unfair_lock_unlock(&_lock);
     }
+
+    // Redundant discovery path for iOS builds where a sandbox can read Darwin
+    // notify state but cannot map the tiny control IOSurface. The frame itself
+    // remains zero-copy: only its generation/ID and timestamp are mirrored.
+    // Publish state first so an interrupted pair can look stale, never falsely
+    // fresh; clients read the two values in the opposite order.
+    BOOL directStatePublished = VCNotifyWriteState(
+        VCNotifyChannelVideoDirectState,
+        state,
+        NO);
+    BOOL directTimestampPublished = directStatePublished &&
+        VCNotifyWriteState(VCNotifyChannelVideoDirectTimestamp,
+                           now,
+                           NO);
+    BOOL directPublished = directStatePublished &&
+        directTimestampPublished;
+
+    VCProducerVideoRuntimeEvent runtimeEvent;
+    if (controlStatePublished && directPublished) {
+        runtimeEvent = VCProducerVideoRuntimePublishedControlAndDirect;
+    } else if (directPublished) {
+        runtimeEvent = VCProducerVideoRuntimePublishedDirectFallback;
+    } else if (controlStatePublished) {
+        runtimeEvent = VCProducerVideoRuntimePublishedControlOnly;
+    } else if (!controlAvailable) {
+        runtimeEvent = VCProducerVideoRuntimeControlSurfaceUnavailable;
+    } else if (!controlStatePublished) {
+        runtimeEvent = VCProducerVideoRuntimeControlStatePublishFailed;
+    } else {
+        runtimeEvent = VCProducerVideoRuntimeDirectStatePublishFailed;
+    }
+    VCReportProducerVideoRuntimeEvent(runtimeEvent, 0);
     if (retired) CVPixelBufferRelease(retired);
-    return controlStatePublished;
+    return controlStatePublished || directPublished;
 }
 
 - (void)invalidate {
@@ -375,6 +458,8 @@ void VCReportApplicationVideoRuntimeEvent(
         atomic_store_explicit(&_control->surfaceState, 0, memory_order_release);
     }
     os_unfair_lock_unlock(&_lock);
+    VCNotifyWriteState(VCNotifyChannelVideoDirectState, 0, NO);
+    VCNotifyWriteState(VCNotifyChannelVideoDirectTimestamp, 0, NO);
     for (NSUInteger index = 0; index < VC_SHARED_VIDEO_RING_SIZE; index++) {
         if (retired[index]) CVPixelBufferRelease(retired[index]);
     }
@@ -438,6 +523,8 @@ void VCReportApplicationVideoRuntimeEvent(
 
     uint64_t state = 0;
     if (!VCNotifyReadState(VCNotifyChannelVideoControl, &state) || state == 0) {
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailureControlStateUnavailable);
         if (_cachedPixelBuffer) CVPixelBufferRelease(_cachedPixelBuffer);
         if (_controlSurface) CFRelease(_controlSurface);
         _cachedPixelBuffer = NULL;
@@ -456,6 +543,8 @@ void VCReportApplicationVideoRuntimeEvent(
 
     IOSurfaceRef surface = IOSurfaceLookup(requestedID);
     if (!surface) {
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailureControlSurfaceLookup);
         _controlRefreshPending = YES;
         return NO;
     }
@@ -466,6 +555,8 @@ void VCReportApplicationVideoRuntimeEvent(
         control->version == VC_SHARED_VIDEO_CONTROL_VERSION;
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
     if (!valid) {
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailureControlSurfaceInvalid);
         CFRelease(surface);
         _controlRefreshPending = YES;
         return NO;
@@ -479,6 +570,7 @@ void VCReportApplicationVideoRuntimeEvent(
     _control = control;
     _controlSurfaceID = requestedID;
     _controlRefreshPending = NO;
+    VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
     return YES;
 }
 
@@ -499,24 +591,86 @@ void VCReportApplicationVideoRuntimeEvent(
     return valid;
 }
 
+- (BOOL)readDirectPublishedState:(uint64_t *)surfaceState
+           timestampMilliseconds:(uint64_t *)timestampMilliseconds {
+    uint64_t timestamp = 0;
+    uint64_t state = 0;
+    // Producer stores state before timestamp. Reading in the opposite order
+    // may conservatively pair a new frame with the preceding timestamp, but
+    // can never make an old frame appear newer than it is.
+    if (!VCNotifyReadState(VCNotifyChannelVideoDirectTimestamp, &timestamp) ||
+        !VCNotifyReadState(VCNotifyChannelVideoDirectState, &state) ||
+        state == 0) {
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailureDirectStateUnavailable);
+        return NO;
+    }
+    if (surfaceState) *surfaceState = state;
+    if (timestampMilliseconds) *timestampMilliseconds = timestamp;
+    VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
+    return YES;
+}
+
+- (BOOL)readLatestPublishedState:(uint64_t *)surfaceState
+          timestampMilliseconds:(uint64_t *)timestampMilliseconds {
+    uint64_t state = 0;
+    uint64_t timestamp = 0;
+    if ([self readDirectPublishedState:&state
+                 timestampMilliseconds:&timestamp]) {
+        if (surfaceState) *surfaceState = state;
+        if (timestampMilliseconds) *timestampMilliseconds = timestamp;
+        return YES;
+    }
+    if ([self readControlSurfaceState:&state
+                timestampMilliseconds:&timestamp]) {
+        if (state != 0) {
+            if (surfaceState) *surfaceState = state;
+            if (timestampMilliseconds) *timestampMilliseconds = timestamp;
+            VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
+            return YES;
+        }
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailureNoPublishedFrame);
+        return NO;
+    }
+    if (VCSharedVideoLastFailureReason() == VCSharedVideoFailureNone) {
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailureNoPublishedFrame);
+    }
+    return NO;
+}
+
 - (CVPixelBufferRef)copyLatestPixelBufferWithMaximumAge:(NSTimeInterval)maximumAge {
+    VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
     uint64_t initialState = 0;
     uint64_t timestamp = 0;
-    if (![self readControlSurfaceState:&initialState
-                 timestampMilliseconds:&timestamp]) return NULL;
+    if (![self readLatestPublishedState:&initialState
+                  timestampMilliseconds:&timestamp]) return NULL;
+    if (initialState == 0) {
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailureNoPublishedFrame);
+        return NULL;
+    }
     uint64_t maximumAgeMilliseconds =
         (uint64_t)(MAX(0.05, maximumAge) * 1000.0);
     if (!VCSharedTimestampIsRecent(VCMonotonicMilliseconds(),
                                    timestamp,
-                                   maximumAgeMilliseconds)) return NULL;
+                                   maximumAgeMilliseconds)) {
+        VCSetSharedVideoFailureReason(VCSharedVideoFailureFrameStale);
+        return NULL;
+    }
 
     // A producer can advance while we look up the surface. Retrying the control
     // word closes that race; the producer also retains three generations.
     for (NSUInteger attempt = 0; attempt < 3; attempt++) {
         uint64_t before = attempt == 0 ? initialState : 0;
-        if (attempt > 0 && ![self readControlSurfaceState:&before
-                                    timestampMilliseconds:NULL]) return NULL;
-        if (before == 0) return NULL;
+        if (attempt > 0 && ![self readLatestPublishedState:&before
+                                     timestampMilliseconds:NULL]) return NULL;
+        if (before == 0) {
+            VCSetSharedVideoFailureReason(
+                VCSharedVideoFailureNoPublishedFrame);
+            return NULL;
+        }
         CVPixelBufferRef cached = NULL;
         os_unfair_lock_lock(&_lock);
         if (_cachedSurfaceState == before && _cachedPixelBuffer) {
@@ -526,13 +680,16 @@ void VCReportApplicationVideoRuntimeEvent(
         if (cached) {
             IOSurfaceRef cachedSurface = CVPixelBufferGetIOSurface(cached);
             if (!cachedSurface) {
+                VCSetSharedVideoFailureReason(
+                    VCSharedVideoFailurePixelBufferWrap);
                 CVPixelBufferRelease(cached);
                 continue;
             }
             IOSurfaceIncrementUseCount(cachedSurface);
             uint64_t after = 0;
-            if ([self readControlSurfaceState:&after timestampMilliseconds:NULL] &&
+            if ([self readLatestPublishedState:&after timestampMilliseconds:NULL] &&
                 before == after) {
+                VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
                 return cached;
             }
             IOSurfaceDecrementUseCount(cachedSurface);
@@ -541,7 +698,11 @@ void VCReportApplicationVideoRuntimeEvent(
         }
         IOSurfaceID surfaceID = (IOSurfaceID)VCSurfaceIDFromState(before);
         IOSurfaceRef surface = IOSurfaceLookup(surfaceID);
-        if (!surface) continue;
+        if (!surface) {
+            VCSetSharedVideoFailureReason(
+                VCSharedVideoFailureFrameSurfaceLookup);
+            continue;
+        }
 
         // CVPixelBufferPool does not automatically honor cross-process users
         // when a surface is passed by global IOSurfaceID. The explicit use
@@ -555,13 +716,15 @@ void VCReportApplicationVideoRuntimeEvent(
                                                             NULL,
                                                             &pixelBuffer);
         if (result != kCVReturnSuccess || !pixelBuffer) {
+            VCSetSharedVideoFailureReason(
+                VCSharedVideoFailurePixelBufferWrap);
             IOSurfaceDecrementUseCount(surface);
             CFRelease(surface);
             continue;
         }
 
         uint64_t after = 0;
-        if ([self readControlSurfaceState:&after timestampMilliseconds:NULL] &&
+        if ([self readLatestPublishedState:&after timestampMilliseconds:NULL] &&
             before == after) {
             CVPixelBufferRef retired = NULL;
             CVPixelBufferRef raced = NULL;
@@ -583,6 +746,8 @@ void VCReportApplicationVideoRuntimeEvent(
                 // previous implicit lease-transfer invariant.
                 IOSurfaceRef racedSurface = CVPixelBufferGetIOSurface(raced);
                 if (!racedSurface) {
+                    VCSetSharedVideoFailureReason(
+                        VCSharedVideoFailurePixelBufferWrap);
                     CVPixelBufferRelease(raced);
                     IOSurfaceDecrementUseCount(surface);
                     CVPixelBufferRelease(pixelBuffer);
@@ -593,28 +758,45 @@ void VCReportApplicationVideoRuntimeEvent(
                 IOSurfaceDecrementUseCount(surface);
                 CVPixelBufferRelease(pixelBuffer);
                 CFRelease(surface);
+                VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
                 return raced;
             }
             CFRelease(surface);
+            VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
             return pixelBuffer;
         }
         IOSurfaceDecrementUseCount(surface);
         CFRelease(surface);
         CVPixelBufferRelease(pixelBuffer);
     }
+    if (VCSharedVideoLastFailureReason() == VCSharedVideoFailureNone) {
+        VCSetSharedVideoFailureReason(
+            VCSharedVideoFailurePublicationRace);
+    }
     return NULL;
 }
 
 - (BOOL)hasPublishedFrameWithMaximumAge:(NSTimeInterval)maximumAge {
+    VCSetSharedVideoFailureReason(VCSharedVideoFailureNone);
     uint64_t state = 0;
     uint64_t timestamp = 0;
-    if (![self readControlSurfaceState:&state
-                 timestampMilliseconds:&timestamp] || state == 0) return NO;
+    if (![self readLatestPublishedState:&state
+                  timestampMilliseconds:&timestamp] || state == 0) {
+        if (VCSharedVideoLastFailureReason() == VCSharedVideoFailureNone) {
+            VCSetSharedVideoFailureReason(
+                VCSharedVideoFailureNoPublishedFrame);
+        }
+        return NO;
+    }
     uint64_t maximumAgeMilliseconds =
         (uint64_t)(MAX(0.05, maximumAge) * 1000.0);
-    return VCSharedTimestampIsRecent(VCMonotonicMilliseconds(),
-                                     timestamp,
-                                     maximumAgeMilliseconds);
+    BOOL recent = VCSharedTimestampIsRecent(VCMonotonicMilliseconds(),
+                                            timestamp,
+                                            maximumAgeMilliseconds);
+    VCSetSharedVideoFailureReason(recent
+        ? VCSharedVideoFailureNone
+        : VCSharedVideoFailureFrameStale);
+    return recent;
 }
 
 - (void)dealloc {

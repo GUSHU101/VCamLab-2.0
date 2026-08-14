@@ -56,8 +56,10 @@ static CIContext *VCSharedCIContext(void) {
 
 static CMSampleBufferRef VCCopyCurrentReplacement(
     CMSampleBufferRef original,
-    VCApplicationVideoRuntimeEvent *runtimeEventOut) CF_RETURNS_RETAINED {
+    VCApplicationVideoRuntimeEvent *runtimeEventOut,
+    uint8_t *runtimeDetailOut) CF_RETURNS_RETAINED {
     if (runtimeEventOut) *runtimeEventOut = VCApplicationVideoRuntimeUnknown;
+    if (runtimeDetailOut) *runtimeDetailOut = 0;
     VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
     // Suppress only for evidence attached to this exact sample. A global
     // mediaserverd heartbeat cannot prove that another capture session, node
@@ -75,6 +77,10 @@ static CMSampleBufferRef VCCopyCurrentReplacement(
     if (!source) {
         if (runtimeEventOut) {
             *runtimeEventOut = VCApplicationVideoRuntimeSourceUnavailable;
+        }
+        if (runtimeDetailOut) {
+            *runtimeDetailOut =
+                (uint8_t)VCSharedVideoLastFailureReason();
         }
         return NULL;
     }
@@ -163,10 +169,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
     VCApplicationVideoRuntimeEvent runtimeEvent =
         VCApplicationVideoRuntimeUnknown;
+    uint8_t runtimeDetail = 0;
     CMSampleBufferRef replacement = VCCopyCurrentReplacement(sampleBuffer,
-                                                              &runtimeEvent);
+                                                              &runtimeEvent,
+                                                              &runtimeDetail);
     if (runtimeEvent != VCApplicationVideoRuntimeUnknown) {
-        VCReportApplicationVideoRuntimeEvent(runtimeEvent, 0);
+        VCReportApplicationVideoRuntimeEvent(runtimeEvent, runtimeDetail);
     }
     [self recordCompatibilityPixelBuffer:
         replacement ? CMSampleBufferGetImageBuffer(replacement) : NULL];
@@ -387,7 +395,9 @@ static CVPixelBufferRef VCCopySessionCompatibilityPixelBuffer(
         shouldDisplay
             ? VCApplicationVideoRuntimePreviewFrameDisplayed
             : VCApplicationVideoRuntimePreviewSourceUnavailable,
-        0);
+        shouldDisplay || outputPathActive
+            ? 0
+            : (uint8_t)VCSharedVideoLastFailureReason());
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];

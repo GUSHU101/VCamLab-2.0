@@ -35,14 +35,15 @@ ls -la /var/jb/Library/PreferenceLoader/Preferences/VirtualCamPro.plist
 
 ## 完全不能替换，而且系统日志为空
 
-先确认安装版本为 2.23.0 或更高。该版本不再依赖 unified log 才能判断注入链路：先打开目标相机应用 10 秒，再切回“设置 → VirtualCamPro → 复制运行诊断信息”。重点查看：
+先确认安装版本为 2.24.0 或更高。该版本不再依赖 unified log 才能判断注入链路：先打开目标相机应用 10 秒，再切回“设置 → VirtualCamPro → 复制运行诊断信息”。重点查看：
 
 - `springBoardRuntime`：无存活信号表示生产者插件未注入；旧的“正在稳定产帧”会被忽略，不再当作当前有效状态。
 - `mediaServerRuntime`：无存活信号表示 `VCMediaServer.dylib` 没有进入 mediaserverd，优先检查安装路径、filter plist 和注入框架。
+- `sharedVideoBus`：应显示控制面与直连帧通道均已发布，或显示直连回退已发布；若失败会明确区分生产帧没有 IOSurface、无全局 Surface ID、控制面创建/发布失败和直连状态失败。
 - `mediaServerVideoStage`：可直接区分找不到 `BWNodeOutput`、签名不兼容、Hook 已安装、共享来源不可见、格式不支持、转换失败和替换成功。
 - `applicationVideoStage`：记录相机应用是否真正进入 AVFoundation Hook、delegate 是否接管、预览是否显示替换帧以及照片替换结果；切回设置后仍保留最后阶段和发生时间。
 
-若 `mediaServerRuntime` 存活且阶段停在“Hook 已安装”，但打开相机后始终没有“共享来源不可见/转换失败/替换成功”，说明该相机模式没有经过当前识别的 `BWNodeOutput emitSampleBuffer:` 入口；2.23.0 会持续低频重扫，但仍需把完整诊断发回用于扩展真机入口。若应用阶段显示“预览已显示替换帧”而实际界面没有变化，则问题位于目标应用的图层合成顺序，而不是解码或共享帧。
+若 `mediaServerRuntime` 存活且阶段停在“Hook 已安装”，但打开相机后始终没有“共享来源不可见/转换失败/替换成功”，说明该相机模式没有经过当前识别的 `BWNodeOutput emitSampleBuffer:` 入口；2.24.0 会持续低频重扫，但仍需把完整诊断发回用于扩展真机入口。若共享来源不可见，括号内的新失败码会指出是状态、时效、帧 IOSurface 查找还是 CoreVideo 包装；若应用阶段显示“预览已显示替换帧”而实际界面没有变化，则问题位于目标应用的图层合成顺序。
 
 ## 点击 VirtualCamPro 后设置闪退
 
