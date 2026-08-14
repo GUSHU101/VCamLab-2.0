@@ -248,17 +248,26 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
 }
 
 - (NSString *)sourceIdentityForPreferences:(VCPreferences *)preferences {
+    NSString *identity = nil;
     switch (preferences.sourceType) {
         case VCSourceTypeScreen:
-            return @"screen";
+            identity = @"screen";
+            break;
         case VCSourceTypeLocalMedia:
-            return preferences.localMediaURL
+            identity = preferences.localMediaURL
                 ? [@"file:" stringByAppendingString:preferences.localMediaURL.path] : nil;
+            break;
         case VCSourceTypeNetwork:
         default:
-            return preferences.streamURL
+            identity = preferences.streamURL
                 ? [@"network:" stringByAppendingString:preferences.streamURL.absoluteString] : nil;
+            break;
     }
+    if (identity.length > 0 && preferences.sourceRestartToken.length > 0) {
+        identity = [identity stringByAppendingFormat:@"#restart=%@",
+                                                     preferences.sourceRestartToken];
+    }
+    return identity;
 }
 
 - (void)refreshPreferencesAndStream {

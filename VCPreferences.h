@@ -17,6 +17,7 @@ FOUNDATION_EXPORT NSString * const VCLocalMediaPathKey;
 FOUNDATION_EXPORT NSString * const VCLoopLocalMediaKey;
 FOUNDATION_EXPORT NSString * const VCHoldLastFrameKey;
 FOUNDATION_EXPORT NSString * const VCStaleFrameTimeoutKey;
+FOUNDATION_EXPORT NSString * const VCSourceRestartTokenKey;
 
 typedef NS_ENUM(NSInteger, VCSourceType) {
     VCSourceTypeNetwork = 0,
@@ -40,6 +41,9 @@ typedef NS_ENUM(NSInteger, VCSourceType) {
 @property (atomic, assign, readonly) BOOL loopLocalMedia;
 @property (atomic, assign, readonly) BOOL holdLastFrame;
 @property (atomic, assign, readonly) NSTimeInterval staleFrameTimeout;
+/// Opaque settings-generated token used to rebuild the active producer without
+/// changing any user-facing source configuration.
+@property (atomic, copy, readonly) NSString *sourceRestartToken;
 
 + (instancetype)sharedPreferences;
 - (BOOL)reload;

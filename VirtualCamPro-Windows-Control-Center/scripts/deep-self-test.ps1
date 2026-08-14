@@ -439,7 +439,7 @@ function Test-FfmpegMjpegRuntime {
     }
 }
 
-Write-DeepResult -Level "INFO" -Message "VirtualCamPro 2.14.0 deep self-test started."
+Write-DeepResult -Level "INFO" -Message "VirtualCamPro 2.15.0 deep self-test started."
 Write-DeepResult -Level "INFO" -Message "Root: $root"
 
 if ($PSVersionTable.PSVersion.Major -lt 5) {

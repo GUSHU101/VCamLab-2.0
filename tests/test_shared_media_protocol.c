@@ -43,18 +43,28 @@ static void testAudioRingWrap(void) {
 
 static void testAudioReadCursor(void) {
     uint64_t start = UINT64_MAX;
-    assert(VCResolveAudioReadStart(1024, 480, 4096, 2000, 0, 0, &start));
-    assert(start == 544);
-    assert(VCResolveAudioReadStart(2048, 480, 4096, 2000, 1, 1024, &start));
+    assert(!VCResolveAudioReadStart(1024, 480, 4096, 2000, 1440,
+                                    0, 0, &start));
+    assert(VCResolveAudioReadStart(2048, 480, 4096, 2000, 1440,
+                                   0, 0, &start));
+    assert(start == 608);
+    assert(VCResolveAudioReadStart(2048, 480, 4096, 2000, 1440,
+                                   1, 1024, &start));
     assert(start == 1024);
-    assert(!VCResolveAudioReadStart(1200, 480, 4096, 2000, 1, 1024, &start));
-    assert(VCResolveAudioReadStart(10000, 480, 4096, 2000, 1, 1024, &start));
-    assert(start == 9520);
-    assert(VCResolveAudioReadStart(14000, 480, 10000, 2000, 1, 10000, &start));
-    assert(start == 13520);
-    assert(!VCResolveAudioReadStart(100, 480, 4096, 2000, 0, 0, &start));
-    assert(!VCResolveAudioReadStart(1024, 0, 4096, 2000, 0, 0, &start));
-    assert(!VCResolveAudioReadStart(1024, 480, 4096, 2000, 0, 0, NULL));
+    assert(!VCResolveAudioReadStart(1200, 480, 4096, 2000, 1440,
+                                    1, 1024, &start));
+    assert(VCResolveAudioReadStart(10000, 480, 4096, 2000, 1440,
+                                   1, 1024, &start));
+    assert(start == 8560);
+    assert(VCResolveAudioReadStart(14000, 480, 10000, 2000, 1440,
+                                   1, 10000, &start));
+    assert(start == 12560);
+    assert(!VCResolveAudioReadStart(100, 480, 4096, 2000, 1440,
+                                    0, 0, &start));
+    assert(!VCResolveAudioReadStart(1024, 0, 4096, 2000, 1440,
+                                    0, 0, &start));
+    assert(!VCResolveAudioReadStart(2048, 480, 4096, 2000, 1440,
+                                    0, 0, NULL));
 }
 
 static void testResampleInputBounds(void) {
@@ -68,6 +78,24 @@ static void testResampleInputBounds(void) {
     assert(VCRequiredCanonicalInputFrames(SIZE_MAX, 1.0) == 0);
 }
 
+static void testStreamingResampleContinuity(void) {
+    assert(VCRequiredStreamingCanonicalFrames(480, 48000.0, 0.0) == 482);
+    assert(VCRequiredStreamingCanonicalFrames(441, 44100.0, 0.0) == 482);
+    assert(VCRequiredStreamingCanonicalFrames(480, 44100.0, 0.0) == 524);
+    assert(VCRequiredStreamingCanonicalFrames(480, 44100.0, -0.1) == 0);
+    assert(VCRequiredStreamingCanonicalFrames(480, 44100.0, 1.0) == 0);
+    size_t consumed = 0;
+    double phase = 0;
+    assert(VCAdvanceStreamingResamplePhase(480, 44100.0, 0.0,
+                                           &consumed, &phase));
+    assert(consumed == 522);
+    assert(phase > 0.44 && phase < 0.45);
+    assert(VCAdvanceStreamingResamplePhase(480, 44100.0, phase,
+                                           &consumed, &phase));
+    assert(consumed == 522 || consumed == 523);
+    assert(phase >= 0.0 && phase < 1.0);
+}
+
 int main(void) {
     testSurfaceStateRoundTrip();
     testPipelineHeartbeatRateLimit();
@@ -76,6 +104,7 @@ int main(void) {
     testAudioRingWrap();
     testAudioReadCursor();
     testResampleInputBounds();
+    testStreamingResampleContinuity();
     puts("shared media protocol tests passed");
     return 0;
 }

@@ -5,7 +5,7 @@
 
 VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/麦克风插件。SpringBoard 进程只生成一份媒体流，`mediaserverd` 在 `CMCapture` 相机媒体图的 `BWNodeOutput` 处替换真实 `CMSampleBuffer`；照片、录像、视频通话、WebRTC 与扫码等下游因此读取同一份替换样本，而不是在界面上覆盖一层图片。
 
-当前版本：`2.14.0`
+当前版本：`2.15.0`
 
 > 正式 `.deb` 由 GitHub Actions 从当前提交构建并作为 `VirtualCamPro-rootless` artifact 发布；不要混用历史 2.8.0 二进制。
 
@@ -14,13 +14,15 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - 单生产者架构：只有 SpringBoard 负责屏幕捕获、网络拉流或本地媒体解码；`mediaserverd` 和应用进程不再各自拉流/解码。
 - 系统相机图替换：`mediaserverd` 在所有可识别的 `BWNodeOutput` 颜色/PCM 节点替换真实样本；压缩辅助流、深度、视差和元数据始终透传。
 - 逐样本自动回退：系统 Hook 给实际替换成功的 sample/pixel buffer 写可传播证据；应用内 `AVCaptureVideoDataOutput` 和音频输出只旁路该具体样本，预览与照片不会再被其他 CaptureSession 的全局心跳误关闭。限频健康状态仅用于诊断，不再决定正确性。
+- 连续本地音频：每个系统节点和应用输出拥有独立 PCM 游标、约 30 ms 抗抖储备及带相位/前视样本的连续重采样上下文，多 CaptureSession 不会互相抢读或在 44.1/48 kHz 回调边界跳样。
 - 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface，并通过一块常驻控制 IOSurface 原子发布帧代次、Surface ID 与时间戳；Darwin notify 只负责控制块建立/失效事件，消费者映射同一物理内存，不复制、序列化或逐帧查询通知状态。
 - 本地媒体：MP4/MOV 等视频可同时替换摄像头和麦克风；纯 MP3/M4A 只替换麦克风，画面继续使用物理摄像头。
 - 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”批量选择视频/音频，或从“照片”一次选择多段视频；无需手工输入路径。导入会逐个检查空间和音视频轨道，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
 - 屏幕镜像：SpringBoard 通过 CoreAnimation 直接渲染到 IOSurface，再交给系统相机管线。
-- HLS：URL 中包含 `.m3u8` 时使用 `AVPlayerItemVideoOutput` 解码。
+- HLS：URL 中包含 `.m3u8` 时使用 `AVPlayerItemVideoOutput` 解码；轮询频率按发送端 nominal FPS 自适应，不再让 30/60 FPS 流固定消耗 240 Hz 主线程轮询。
 - MJPEG：其他 HTTP/HTTPS URL 按连续 JPEG 流解析；增量校验 JPEG 段结构、直接读取 SOF 尺寸并限制单帧与接收缓冲。优先尝试实时 VideoToolbox→IOSurface NV12 解码，不支持时自动回退 ImageIO。
 - 网络流参数透传：手机不旋转、镜像、限帧、缩略或重编码网络帧，分辨率、方向、帧率和质量由 Windows/OBS 发送端决定；网络模式不发布替换音频，始终使用手机原生麦克风。
+- 运行状态与恢复：设置页直接显示 SpringBoard 来源产帧状态和最近的 mediaserverd 系统视频接管状态，并可在不改变任何来源参数的情况下原子重载当前生产者。
 - VideoToolbox 像素转换：输出尺寸、像素格式和时间戳跟随真实相机原始帧。
 - 转换结果缓存：多个来源代次和相机图节点可复用已转换像素缓冲；池/缓存锁与 VideoToolbox session lane 分离，lane 繁忙时同目标节点复用最近完成帧而不阻塞媒体图。缓存使用 LRU 且硬限制为 64 MiB，兼顾 A10 连续性与内存稳定。
 - 媒体图热分发：`BWNodeOutput` 原始实现按运行时类写入 128 槽无锁正向缓存，正常帧不再重复遍历类继承链和 Hook 表；动态加载的新子类仍会刷新对应项。
@@ -95,7 +97,7 @@ FFmpeg 的简易 MJPEG HTTP 输出一次只服务一个连接。需要多客户�
 | --- | --- | --- |
 | SpringBoard | 屏幕捕获、网络/本地媒体解码、本地文件方向变换、IOSurface 发布 | 是，设备上唯一一份 |
 | `mediaserverd` | 在系统相机媒体图中匹配原尺寸/格式/时间戳并替换颜色或 PCM 样本 | 否 |
-| 相机应用 / WebKit | 正常消费系统相机；低层心跳消失时自动启用 AVFoundation 回退 | 否 |
+| 相机应用 / WebKit | 正常消费系统相机；当前样本没有系统替换证据时按该样本执行 AVFoundation 回退 | 否 |
 
 来源尚未产生第一帧时保留真实相机输出。收到过替换帧后，默认断流保持最后一帧；若关闭“断流后保持最后一帧”，超过“旧帧超时”后恢复真实相机。网络来源会在后台持续重连。
 

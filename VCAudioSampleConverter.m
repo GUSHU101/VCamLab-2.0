@@ -3,9 +3,150 @@
 #import "VCSharedMediaBus.h"
 #import "VCSharedMediaProtocol.h"
 #import <AudioToolbox/AudioToolbox.h>
+#import <float.h>
 #import <math.h>
+#import <os/lock.h>
 
 static const Float64 VCCanonicalAudioSampleRate = 48000.0;
+
+@interface VCAudioReplacementContext () {
+    os_unfair_lock _lock;
+    VCSharedAudioCursor *_cursor;
+    float *_canonicalFrames;
+    size_t _canonicalCapacityFrames;
+    size_t _canonicalAvailableFrames;
+    double _sourcePhase;
+    Float64 _outputSampleRate;
+}
+- (BOOL)copyResampledStereoFrames:(size_t)outputFrameCount
+                       sampleRate:(Float64)sampleRate
+                             into:(float *)destination;
+@end
+
+@implementation VCAudioReplacementContext
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _lock = (os_unfair_lock)OS_UNFAIR_LOCK_INIT;
+        _cursor = [VCSharedAudioCursor new];
+    }
+    return self;
+}
+
+- (void)resetLocked {
+    _canonicalAvailableFrames = 0;
+    _sourcePhase = 0;
+    _outputSampleRate = 0;
+    [_cursor reset];
+}
+
+- (void)reset {
+    os_unfair_lock_lock(&_lock);
+    [self resetLocked];
+    os_unfair_lock_unlock(&_lock);
+}
+
+- (BOOL)ensureCanonicalCapacityLocked:(size_t)requiredFrames {
+    if (requiredFrames <= _canonicalCapacityFrames) return YES;
+    if (requiredFrames > VC_SHARED_AUDIO_CAPACITY_FRAMES ||
+        requiredFrames > SIZE_MAX / (2u * sizeof(float))) return NO;
+    size_t capacity = MAX((size_t)1024, _canonicalCapacityFrames);
+    while (capacity < requiredFrames) {
+        if (capacity > VC_SHARED_AUDIO_CAPACITY_FRAMES / 2u) {
+            capacity = VC_SHARED_AUDIO_CAPACITY_FRAMES;
+            break;
+        }
+        capacity *= 2u;
+    }
+    float *resized = realloc(_canonicalFrames, capacity * 2u * sizeof(float));
+    if (!resized) return NO;
+    _canonicalFrames = resized;
+    _canonicalCapacityFrames = capacity;
+    return YES;
+}
+
+- (BOOL)copyResampledStereoFrames:(size_t)outputFrameCount
+                       sampleRate:(Float64)sampleRate
+                             into:(float *)destination {
+    if (!destination || outputFrameCount == 0 || !isfinite(sampleRate) ||
+        sampleRate <= 0) return NO;
+    os_unfair_lock_lock(&_lock);
+    if (_outputSampleRate > 0 && fabs(_outputSampleRate - sampleRate) > DBL_EPSILON) {
+        [self resetLocked];
+    }
+    _outputSampleRate = sampleRate;
+
+    BOOL ready = NO;
+    for (NSUInteger attempt = 0; attempt < 2 && !ready; attempt++) {
+        size_t requiredFrames = VCRequiredStreamingCanonicalFrames(
+            outputFrameCount, sampleRate, _sourcePhase);
+        if (requiredFrames == 0 || ![self ensureCanonicalCapacityLocked:requiredFrames]) {
+            break;
+        }
+        size_t missingFrames = requiredFrames > _canonicalAvailableFrames
+            ? requiredFrames - _canonicalAvailableFrames : 0;
+        if (missingFrames == 0 ||
+            [[VCSharedAudioClient sharedClient]
+                copyLatestInterleavedStereoFrames:missingFrames
+                                             into:_canonicalFrames +
+                                                  _canonicalAvailableFrames * 2u
+                                           cursor:_cursor]) {
+            _canonicalAvailableFrames += missingFrames;
+            ready = YES;
+            break;
+        }
+        [self resetLocked];
+        _outputSampleRate = sampleRate;
+    }
+    if (!ready) {
+        os_unfair_lock_unlock(&_lock);
+        return NO;
+    }
+
+    double sourceStep = VCCanonicalAudioSampleRate / sampleRate;
+    for (size_t frame = 0; frame < outputFrameCount; frame++) {
+        double sourcePosition = _sourcePhase + (double)frame * sourceStep;
+        size_t leftIndex = (size_t)floor(sourcePosition);
+        size_t rightIndex = MIN(leftIndex + 1u, _canonicalAvailableFrames - 1u);
+        float fraction = (float)(sourcePosition - floor(sourcePosition));
+        destination[frame * 2u] =
+            _canonicalFrames[leftIndex * 2u] * (1.0f - fraction) +
+            _canonicalFrames[rightIndex * 2u] * fraction;
+        destination[frame * 2u + 1u] =
+            _canonicalFrames[leftIndex * 2u + 1u] * (1.0f - fraction) +
+            _canonicalFrames[rightIndex * 2u + 1u] * fraction;
+    }
+
+    size_t consumedFrames = 0;
+    double nextPhase = 0;
+    BOOL advanced = VCAdvanceStreamingResamplePhase(outputFrameCount,
+                                                     sampleRate,
+                                                     _sourcePhase,
+                                                     &consumedFrames,
+                                                     &nextPhase);
+    if (!advanced || consumedFrames > _canonicalAvailableFrames) {
+        [self resetLocked];
+        os_unfair_lock_unlock(&_lock);
+        return NO;
+    }
+    size_t remainingFrames = _canonicalAvailableFrames - consumedFrames;
+    if (remainingFrames > 0 && consumedFrames > 0) {
+        memmove(_canonicalFrames,
+                _canonicalFrames + consumedFrames * 2u,
+                remainingFrames * 2u * sizeof(float));
+    }
+    _canonicalAvailableFrames = remainingFrames;
+    _sourcePhase = nextPhase;
+    os_unfair_lock_unlock(&_lock);
+    return YES;
+}
+
+- (void)dealloc {
+    free(_canonicalFrames);
+}
+
+@end
 
 static void VCCopyDictionaryEntry(const void *key,
                                   const void *value,
@@ -78,8 +219,9 @@ static BOOL VCWriteSample(uint8_t *destination,
 }
 
 CMSampleBufferRef VCCopyReplacementAudioSampleBuffer(
-    CMSampleBufferRef originalSampleBuffer) {
-    if (!originalSampleBuffer) return NULL;
+    CMSampleBufferRef originalSampleBuffer,
+    VCAudioReplacementContext *context) {
+    if (!originalSampleBuffer || !context) return NULL;
     CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(originalSampleBuffer);
     const AudioStreamBasicDescription *asbd = format
         ? CMAudioFormatDescriptionGetStreamBasicDescription(format) : NULL;
@@ -107,15 +249,12 @@ CMSampleBufferRef VCCopyReplacementAudioSampleBuffer(
     if (bytesPerBuffer > UINT32_MAX || bufferCount > SIZE_MAX / bytesPerBuffer) return NULL;
     size_t totalByteCount = bytesPerBuffer * bufferCount;
 
-    NSUInteger inputFrameCount = VCRequiredCanonicalInputFrames(
-        frameCount, asbd->mSampleRate);
-    if (inputFrameCount == 0 || inputFrameCount > SIZE_MAX / (2 * sizeof(float))) {
-        return NULL;
-    }
-    float *source = calloc(inputFrameCount * 2, sizeof(float));
+    if (frameCount > SIZE_MAX / (2u * sizeof(float))) return NULL;
+    float *source = calloc(frameCount * 2u, sizeof(float));
     if (!source) return NULL;
-    if (![[VCSharedAudioClient sharedClient]
-            copyLatestInterleavedStereoFrames:inputFrameCount into:source]) {
+    if (![context copyResampledStereoFrames:frameCount
+                                 sampleRate:asbd->mSampleRate
+                                       into:source]) {
         free(source);
         return NULL;
     }
@@ -139,17 +278,10 @@ CMSampleBufferRef VCCopyReplacementAudioSampleBuffer(
         buffer->mData = rawBytes + (size_t)bufferIndex * bytesPerBuffer;
     }
 
-    double sourceStep = VCCanonicalAudioSampleRate / asbd->mSampleRate;
     BOOL wroteAllSamples = YES;
     for (CMItemCount frame = 0; frame < outputFrameCount && wroteAllSamples; frame++) {
-        double sourcePosition = (double)frame * sourceStep;
-        NSUInteger leftIndex = MIN((NSUInteger)floor(sourcePosition), inputFrameCount - 1);
-        NSUInteger rightIndex = MIN(leftIndex + 1, inputFrameCount - 1);
-        float fraction = (float)(sourcePosition - floor(sourcePosition));
-        float left = source[leftIndex * 2] * (1.0f - fraction) +
-                     source[rightIndex * 2] * fraction;
-        float right = source[leftIndex * 2 + 1] * (1.0f - fraction) +
-                      source[rightIndex * 2 + 1] * fraction;
+        float left = source[(size_t)frame * 2u];
+        float right = source[(size_t)frame * 2u + 1u];
         for (UInt32 channel = 0; channel < channels; channel++) {
             float value = channels == 1 ? (left + right) * 0.5f
                                         : (channel == 0 ? left : (channel == 1 ? right : 0));

@@ -19,6 +19,26 @@
             <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
         </dict>
         <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>运行状态与恢复</string>
+            <key>footerText</key><string>来源状态反映 SpringBoard 是否持续产帧；系统视频管线仅在相机应用实际请求采集时才会显示 mediaserverd 活跃。状态是诊断信息，不作为关闭应用层逐样本 fallback 的全局门控。</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>当前来源</string>
+            <key>get</key><string>currentSourceRuntimeStatus:</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>系统视频管线</string>
+            <key>get</key><string>currentSystemVideoPipelineStatus:</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>重载当前来源</string>
+            <key>action</key><string>reloadCurrentSource:</string>
+        </dict>
+        <dict>
             <key>cell</key><string>PSLinkListCell</string>
             <key>detail</key><string>PSListItemsController</string>
             <key>default</key><integer>0</integer>

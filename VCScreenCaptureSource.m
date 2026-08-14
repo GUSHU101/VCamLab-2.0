@@ -28,12 +28,17 @@ typedef void (*VCRenderDisplayFunction)(uint32_t contextID,
     CVPixelBufferPoolRef _pool;
     size_t _poolWidth;
     size_t _poolHeight;
+    size_t _screenWidth;
+    size_t _screenHeight;
+    NSUInteger _geometryRefreshCountdown;
+    BOOL _geometryRefreshPending;
     BOOL _reportedUnavailableRenderer;
 }
 @property (atomic, assign, readwrite, getter=isRunning) BOOL running;
 @property (nonatomic, strong) dispatch_source_t timer;
 @property (nonatomic, strong) dispatch_queue_t captureQueue;
 @property (nonatomic, assign) VCRenderDisplayFunction renderDisplay;
+- (void)requestScreenGeometryRefreshIfNeeded:(BOOL)force;
 @end
 
 @implementation VCScreenCaptureSource
@@ -95,6 +100,7 @@ typedef void (*VCRenderDisplayFunction)(uint32_t contextID,
     __weak VCScreenCaptureSource *weakSelf = self;
     dispatch_source_set_event_handler(timer, ^{ [weakSelf captureFrame]; });
     self.timer = timer;
+    [self requestScreenGeometryRefreshIfNeeded:YES];
     NSInteger fps = self.preferredFPS;
     uint64_t interval = NSEC_PER_SEC / (uint64_t)fps;
     dispatch_source_set_timer(timer,
@@ -117,32 +123,12 @@ typedef void (*VCRenderDisplayFunction)(uint32_t contextID,
 
 - (void)captureFrame {
     if (!self.running || !self.renderDisplay) return;
-    __block CGRect bounds = CGRectZero;
-    __block CGFloat scale = 1.0;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        Class screenClass = NSClassFromString(@"UIScreen");
-        SEL mainScreenSelector = sel_registerName("mainScreen");
-        id screen = screenClass && [screenClass respondsToSelector:mainScreenSelector]
-            ? ((id (*)(id, SEL))objc_msgSend)((id)screenClass, mainScreenSelector) : nil;
-        if (!screen) return;
-        SEL boundsSelector = sel_registerName("bounds");
-        SEL nativeScaleSelector = sel_registerName("nativeScale");
-        SEL scaleSelector = sel_registerName("scale");
-        if ([screen respondsToSelector:boundsSelector]) {
-            bounds = ((CGRect (*)(id, SEL))objc_msgSend)(screen, boundsSelector);
-        }
-        if ([screen respondsToSelector:nativeScaleSelector]) {
-            scale = ((CGFloat (*)(id, SEL))objc_msgSend)(screen, nativeScaleSelector);
-        } else if ([screen respondsToSelector:scaleSelector]) {
-            scale = ((CGFloat (*)(id, SEL))objc_msgSend)(screen, scaleSelector);
-        }
-    });
-    if (CGRectIsEmpty(bounds)) {
-        [self reportErrorOnce:@"UIScreen geometry is unavailable in SpringBoard"];
-        return;
-    }
-    size_t width = MAX((size_t)1, (size_t)llround(CGRectGetWidth(bounds) * scale));
-    size_t height = MAX((size_t)1, (size_t)llround(CGRectGetHeight(bounds) * scale));
+    [self requestScreenGeometryRefreshIfNeeded:NO];
+    os_unfair_lock_lock(&_lock);
+    size_t width = _screenWidth;
+    size_t height = _screenHeight;
+    os_unfair_lock_unlock(&_lock);
+    if (width == 0 || height == 0) return;
     CVPixelBufferPoolRef pool = [self copyPoolForWidth:width height:height];
     if (!pool) return;
 
@@ -175,6 +161,65 @@ typedef void (*VCRenderDisplayFunction)(uint32_t contextID,
     VCScreenFrameCallback callback = self.frameCallback;
     if (callback && self.running) callback(pixelBuffer);
     CVPixelBufferRelease(pixelBuffer);
+}
+
+- (void)requestScreenGeometryRefreshIfNeeded:(BOOL)force {
+    BOOL schedule = NO;
+    os_unfair_lock_lock(&_lock);
+    if (force) _geometryRefreshCountdown = 0;
+    if (!_geometryRefreshPending &&
+        (_screenWidth == 0 || _screenHeight == 0 ||
+         _geometryRefreshCountdown == 0)) {
+        _geometryRefreshPending = YES;
+        _geometryRefreshCountdown = (NSUInteger)MAX(1, self.preferredFPS / 4);
+        schedule = YES;
+    } else if (_geometryRefreshCountdown > 0) {
+        _geometryRefreshCountdown--;
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (!schedule) return;
+
+    __weak VCScreenCaptureSource *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        VCScreenCaptureSource *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        CGRect bounds = CGRectZero;
+        CGFloat scale = 1.0;
+        Class screenClass = NSClassFromString(@"UIScreen");
+        SEL mainScreenSelector = sel_registerName("mainScreen");
+        id screen = screenClass && [screenClass respondsToSelector:mainScreenSelector]
+            ? ((id (*)(id, SEL))objc_msgSend)((id)screenClass, mainScreenSelector) : nil;
+        SEL boundsSelector = sel_registerName("bounds");
+        SEL nativeScaleSelector = sel_registerName("nativeScale");
+        SEL scaleSelector = sel_registerName("scale");
+        if (screen && [screen respondsToSelector:boundsSelector]) {
+            bounds = ((CGRect (*)(id, SEL))objc_msgSend)(screen, boundsSelector);
+        }
+        if (screen && [screen respondsToSelector:nativeScaleSelector]) {
+            scale = ((CGFloat (*)(id, SEL))objc_msgSend)(screen, nativeScaleSelector);
+        } else if (screen && [screen respondsToSelector:scaleSelector]) {
+            scale = ((CGFloat (*)(id, SEL))objc_msgSend)(screen, scaleSelector);
+        }
+        BOOL valid = !CGRectIsEmpty(bounds) && isfinite(scale) && scale > 0 &&
+            isfinite(CGRectGetWidth(bounds)) && isfinite(CGRectGetHeight(bounds));
+        size_t width = valid
+            ? (size_t)llround(CGRectGetWidth(bounds) * scale) : 0;
+        size_t height = valid
+            ? (size_t)llround(CGRectGetHeight(bounds) * scale) : 0;
+        if (width == 0 || height == 0 || width > 8192 || height > 8192) {
+            width = 0;
+            height = 0;
+        }
+        os_unfair_lock_lock(&strongSelf->_lock);
+        strongSelf->_screenWidth = width;
+        strongSelf->_screenHeight = height;
+        strongSelf->_geometryRefreshPending = NO;
+        os_unfair_lock_unlock(&strongSelf->_lock);
+        if (width == 0 || height == 0) {
+            [strongSelf reportErrorOnce:
+                @"UIScreen geometry is unavailable in SpringBoard"];
+        }
+    });
 }
 
 - (CVPixelBufferPoolRef)copyPoolForWidth:(size_t)width

@@ -208,11 +208,18 @@ didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 @interface VCAudioDataOutputProxy : NSObject <AVCaptureAudioDataOutputSampleBufferDelegate>
 @property (nonatomic, weak) id<AVCaptureAudioDataOutputSampleBufferDelegate> originalDelegate;
+@property (nonatomic, strong) VCAudioReplacementContext *replacementContext;
 @end
 
 static char VCAudioOutputProxyAssociationKey;
 
 @implementation VCAudioDataOutputProxy
+
+- (instancetype)init {
+    self = [super init];
+    if (self) _replacementContext = [VCAudioReplacementContext new];
+    return self;
+}
 
 - (BOOL)respondsToSelector:(SEL)selector {
     return [super respondsToSelector:selector] || [self.originalDelegate respondsToSelector:selector];
@@ -229,7 +236,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     id<AVCaptureAudioDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
     if (![delegate respondsToSelector:_cmd]) return;
     CMSampleBufferRef replacement = VCSampleWasReplacedBySystem(sampleBuffer)
-        ? NULL : VCCopyReplacementAudioSampleBuffer(sampleBuffer);
+        ? NULL : VCCopyReplacementAudioSampleBuffer(sampleBuffer,
+                                                     self.replacementContext);
     [delegate captureOutput:output
       didOutputSampleBuffer:replacement ?: sampleBuffer
              fromConnection:connection];

@@ -627,11 +627,35 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
     os_unfair_lock _lock;
     IOSurfaceRef _surface;
     uint64_t _surfaceState;
-    IOSurfaceID _readSurfaceID;
-    uint64_t _nextReadFrame;
-    BOOL _readCursorValid;
     BOOL _surfaceRefreshPending;
 }
+@end
+
+@interface VCSharedAudioCursor () {
+@package
+    os_unfair_lock _lock;
+    uint64_t _surfaceState;
+    uint64_t _nextReadFrame;
+    BOOL _valid;
+}
+@end
+
+@implementation VCSharedAudioCursor
+
+- (instancetype)init {
+    self = [super init];
+    if (self) _lock = (os_unfair_lock)OS_UNFAIR_LOCK_INIT;
+    return self;
+}
+
+- (void)reset {
+    os_unfair_lock_lock(&_lock);
+    _surfaceState = 0;
+    _nextReadFrame = 0;
+    _valid = NO;
+    os_unfair_lock_unlock(&_lock);
+}
+
 @end
 
 @implementation VCSharedAudioClient
@@ -649,7 +673,7 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
     return self;
 }
 
-- (IOSurfaceRef)copyCurrentSurface {
+- (IOSurfaceRef)copyCurrentSurfaceWithState:(uint64_t *)surfaceStateOut {
     os_unfair_lock_lock(&_lock);
     BOOL shouldRefresh = !_surface || _surfaceRefreshPending ||
         VCNotifyCheckChanged(VCNotifyChannelAudioSurface);
@@ -659,7 +683,6 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
             if (_surface) CFRelease(_surface);
             _surface = NULL;
             _surfaceState = 0;
-            _readCursorValid = NO;
             _surfaceRefreshPending = NO;
             os_unfair_lock_unlock(&_lock);
             return NULL;
@@ -690,19 +713,21 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
             if (_surface) CFRelease(_surface);
             _surface = replacement;
             _surfaceState = state;
-            _readCursorValid = NO;
         }
         _surfaceRefreshPending = NO;
     }
     IOSurfaceRef result = _surface ? (IOSurfaceRef)CFRetain(_surface) : NULL;
+    if (surfaceStateOut) *surfaceStateOut = result ? _surfaceState : 0;
     os_unfair_lock_unlock(&_lock);
     return result;
 }
 
 - (BOOL)copyLatestInterleavedStereoFrames:(NSUInteger)frameCount
-                                      into:(float *)destination {
-    if (!destination || frameCount == 0) return NO;
-    IOSurfaceRef surface = [self copyCurrentSurface];
+                                      into:(float *)destination
+                                    cursor:(VCSharedAudioCursor *)cursor {
+    if (!destination || frameCount == 0 || !cursor) return NO;
+    uint64_t surfaceState = 0;
+    IOSurfaceRef surface = [self copyCurrentSurfaceWithState:&surfaceState];
     if (!surface) return NO;
     IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
     VCSharedAudioRing *ring = (VCSharedAudioRing *)IOSurfaceGetBaseAddress(surface);
@@ -722,16 +747,16 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
         uint64_t end = atomic_load_explicit(&ring->totalFramesWritten,
                                             memory_order_acquire);
         uint64_t start = 0;
-        IOSurfaceID currentSurfaceID = IOSurfaceGetID(surface);
-        os_unfair_lock_lock(&_lock);
-        BOOL cursorMatchesSurface = _readCursorValid &&
-            _readSurfaceID == currentSurfaceID;
+        os_unfair_lock_lock(&cursor->_lock);
+        BOOL cursorMatchesSurface = cursor->_valid &&
+            cursor->_surfaceState == surfaceState;
         valid = VCResolveAudioReadStart(end,
                                         frameCount,
                                         ring->capacityFrames,
                                         VC_SHARED_AUDIO_MAX_LAG_FRAMES,
+                                        VC_SHARED_AUDIO_TARGET_LEAD_FRAMES,
                                         cursorMatchesSurface,
-                                        _nextReadFrame,
+                                        cursor->_nextReadFrame,
                                         &start);
         if (valid) {
             for (NSUInteger frame = 0; frame < frameCount; frame++) {
@@ -745,14 +770,14 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
                                                          memory_order_acquire);
             valid = endAfterCopy - start <= ring->capacityFrames;
             if (valid) {
-                _readSurfaceID = currentSurfaceID;
-                _nextReadFrame = start + frameCount;
-                _readCursorValid = YES;
+                cursor->_surfaceState = surfaceState;
+                cursor->_nextReadFrame = start + frameCount;
+                cursor->_valid = YES;
             } else {
-                _readCursorValid = NO;
+                cursor->_valid = NO;
             }
         }
-        os_unfair_lock_unlock(&_lock);
+        os_unfair_lock_unlock(&cursor->_lock);
     }
     IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
     CFRelease(surface);
@@ -760,7 +785,7 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
 }
 
 - (BOOL)hasPublishedAudioWithMaximumAge:(NSTimeInterval)maximumAge {
-    IOSurfaceRef surface = [self copyCurrentSurface];
+    IOSurfaceRef surface = [self copyCurrentSurfaceWithState:NULL];
     if (!surface) return NO;
     IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
     VCSharedAudioRing *ring = (VCSharedAudioRing *)IOSurfaceGetBaseAddress(surface);

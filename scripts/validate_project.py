@@ -174,8 +174,13 @@ def validate_preferences() -> None:
             "currentLocalVideoPlaylistSummary:",
             "currentLocalTransformStatus:",
             "currentLocalVolumeHookStatus:",
+            "currentSourceRuntimeStatus:",
+            "currentSystemVideoPipelineStatus:",
+            "reloadCurrentSource:",
+            "sourceRestartToken",
+            "pipeline.video.heartbeat.v1",
         ),
-        "native local-media picker",
+        "native source picker and runtime recovery",
     )
     require(bundle_makefile, ("AVFoundation", "PhotosUI"), "preference bundle frameworks")
     if "compatibilityMode" in keyed or "VCCompatibilityModeKey" in header:
@@ -236,7 +241,11 @@ def validate_zero_copy_bus() -> None:
             "VC_SHARED_VIDEO_RING_SIZE 3u",
             "VCPackSurfaceState",
             "VCRequiredCanonicalInputFrames",
+            "VCRequiredStreamingCanonicalFrames",
+            "VCAdvanceStreamingResamplePhase",
             "VCResolveAudioReadStart",
+            "VC_SHARED_AUDIO_TARGET_LEAD_FRAMES",
+            "VCSharedAudioCursor",
             "IOSurfaceGetID",
             "IOSurfaceLookup",
             "CVPixelBufferCreateWithIOSurface",
@@ -290,9 +299,13 @@ def validate_zero_copy_bus() -> None:
             "CVPixelBufferPoolCreatePixelBufferWithAuxAttributes",
             "kIOSurfaceIsGlobal",
             "if (!self.renderDisplay)",
+            "requestScreenGeometryRefreshIfNeeded",
+            "_geometryRefreshPending",
         ),
         "screen producer",
     )
+    if "dispatch_sync(dispatch_get_main_queue()" in screen:
+        fail("screen capture hot path must not synchronously block SpringBoard main")
     require(
         local,
         (
@@ -351,7 +364,11 @@ def validate_zero_copy_bus() -> None:
             "copyPixelBufferFromJPEGDataUsingImageIO",
             "_mjpegSupersededFrameCount",
             "average-decode=%.2fms",
-            "VCHLSPollingFPS = 240",
+            "VCHLSInitialPollingFPS = 120",
+            "VCHLSMaximumPollingFPS = 240",
+            "configureHLSFrameTimerForPlayerItem",
+            "_mjpegVTDisabledUntil",
+            "CFAbsoluteTimeGetCurrent() + 30.0",
             "preferredForwardBufferDuration = 0.25",
             "catchUpToHLSLiveEdgeIfNeeded",
         ),
@@ -375,6 +392,7 @@ def validate_zero_copy_bus() -> None:
             "trackRotation + userRotation",
             "publishLocalTransformStatusReady",
             "Do not depend on this process receiving its own Darwin notification",
+            "sourceRestartToken",
         ),
         "source-specific media policy",
     )
@@ -466,6 +484,12 @@ def validate_hooks_and_fail_open() -> None:
     require(
         audio,
         (
+            "VCAudioReplacementContext",
+            "VCSharedAudioCursor",
+            "_canonicalAvailableFrames",
+            "_sourcePhase",
+            "VCRequiredStreamingCanonicalFrames",
+            "VCAdvanceStreamingResamplePhase",
             "kAudioFormatLinearPCM",
             "outputFrameCount",
             "CMSampleBufferGetPresentationTimeStamp",
@@ -641,6 +665,7 @@ def validate_jpeg_parser_tests() -> None:
             "testAudioRingWrap",
             "testAudioReadCursor",
             "testResampleInputBounds",
+            "testStreamingResampleContinuity",
         ),
         "shared media protocol tests",
     )

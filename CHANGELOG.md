@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.15.0 - 2026-08-14
+
+- Replaced the process-global local-audio read position with an independent cursor per `BWNodeOutput` and application output, then added a 30 ms bounded startup reservoir so concurrent CaptureSessions neither steal PCM nor underflow at AVAssetReader batch boundaries.
+- Added a stateful streaming resampler that preserves fractional phase and look-ahead frames across microphone callbacks; 44.1/48/96 kHz outputs no longer over-consume interpolation samples or restart phase on every sample buffer.
+- Removed the synchronous SpringBoard-main `UIScreen` geometry query from every screen frame. Geometry is now asynchronously coalesced at roughly 4 Hz, including retry-safe handling when UIKit temporarily cannot expose a screen.
+- Made HLS frame polling adapt to twice the sender's nominal frame rate within 30–240 Hz, and changed transient MJPEG VideoToolbox failures from a process-lifetime CPU fallback to a 30-second retry cooldown.
+- Added Settings runtime rows for SpringBoard source production and recent mediaserverd video replacement plus an atomic “reload current source” action that preserves the selected URL/file and all presentation settings.
+- Extended protocol tests and repository invariants for independent audio cursors, buffered startup, continuous resampling, screen hot-path isolation, adaptive network decoding and the new recovery UI. Private `BWNodeOutput` behavior still requires the documented iOS 15.8.8 device run.
+
 ## 2.14.0 - 2026-08-14
 
 - Moved per-frame video generation/Surface ID/freshness into a persistent shared IOSurface control block and audio freshness into the PCM ring header. Darwin notify is now a lifecycle discovery channel only, eliminating per-frame cross-process state traffic while retaining retryable remapping after producer changes.

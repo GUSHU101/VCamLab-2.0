@@ -42,10 +42,18 @@ FOUNDATION_EXPORT void VCReleaseSharedVideoPixelBuffer(
 - (void)handleMemoryPressure;
 @end
 
+/// Independent consumer position in the shared PCM ring. Every BW output node
+/// and application delegate owns one cursor so concurrent CaptureSessions do
+/// not steal audio frames from one another.
+@interface VCSharedAudioCursor : NSObject
+- (void)reset;
+@end
+
 @interface VCSharedAudioClient : NSObject
 + (instancetype)sharedClient;
 - (BOOL)copyLatestInterleavedStereoFrames:(NSUInteger)frameCount
-                                      into:(float *)destination;
+                                      into:(float *)destination
+                                    cursor:(VCSharedAudioCursor *)cursor;
 - (BOOL)hasPublishedAudioWithMaximumAge:(NSTimeInterval)maximumAge;
 @end
 

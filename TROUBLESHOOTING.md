@@ -105,7 +105,7 @@ start-obs-vcam.bat --check
 
 ## 预览画面与录像、照片或应用实际输入不一致
 
-系统主路径在 `mediaserverd` 内统一替换样本，预览、录像和处理回调自然得到同一内容。系统心跳缺失时，应用自动回退优先把“已经按相机输出模板转换完成的同一像素缓冲”送到预览层；照片的 `previewPixelBuffer`、主 `pixelBuffer`、CGImage 和最终文件也锁定同一个共享源帧。
+系统主路径在 `mediaserverd` 内统一替换样本，预览、录像和处理回调自然得到同一内容。当前样本没有系统替换证据时，应用自动回退优先把“已经按相机输出模板转换完成的同一像素缓冲”送到预览层；另一个 Session 的全局心跳不会影响这次判断。照片的 `previewPixelBuffer`、主 `pixelBuffer`、CGImage 和最终文件也锁定同一个共享源帧。
 
 最终照片会读回核对替换尺寸和真实 TIFF/EXIF/GPS/Apple 信息。原相机的深度、视差、人物/语义蒙版、HDR 增益图及辅助图描述的是另一场景，不能与替换画面可信配对，因此不会复制到替换照片。
 
@@ -115,7 +115,7 @@ Windows 端应确保 OBS 画布就是希望发送的最终网络构图；`VCAM_S
 
 这是设计边界，不是设备注册失败。插件替换现有 iPhone 相机管线中的真实媒体样本，不注册新的 `AVCaptureDevice`，因此应用和网页仍只会列出系统已有的前置/后置相机。选择任意真实相机并观察其内容是否被系统媒体图替换。
 
-Safari/网页仍必须在正常的系统相机授权和安全上下文中调用 `getUserMedia`。系统节点无心跳时 WebKit 内容进程会自动使用 AVFoundation 回退；彻底关闭 Safari/目标浏览器后重开即可。所有进程都消费同一 IOSurface，不会建立第二条 MJPEG 连接。应用使用自研/非 AVFoundation 管线时仍需单独适配，不能通过伪造设备名称稳定解决。
+Safari/网页仍必须在正常的系统相机授权和安全上下文中调用 `getUserMedia`。WebKit 当前样本没有系统替换证据时会自动使用 AVFoundation 回退；设置页心跳只用于显示 mediaserverd 最近是否工作。彻底关闭 Safari/目标浏览器后重开即可。所有进程都消费同一 IOSurface，不会建立第二条 MJPEG 连接。应用使用自研/非 AVFoundation 管线时仍需单独适配，不能通过伪造设备名称稳定解决。
 
 ## 相机应用崩溃
 

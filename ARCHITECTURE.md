@@ -45,7 +45,7 @@ L0/L1 若要出现“虚拟画面”，必须开发可被 Apple 相机栈接受�
                                v
         Camera / Photo / Movie / FaceTime / WebRTC / 扫码
 
-        系统 Hook 无实际输出心跳 ──> 应用 AVFoundation 自动回退
+        当前样本无系统替换证据 ──> 该样本执行 AVFoundation fallback
 ```
 
 SpringBoard 实例负责 `AVAssetStreamAdapter`、`VCScreenCaptureSource` 或 `VCLocalMediaSource`。`mediaserverd` 和每个应用都只运行 `VCSharedVideoClient`/`VCSharedAudioClient`，不建立网络连接、不重复解码媒体。
@@ -73,6 +73,8 @@ SpringBoard 实例负责 `AVAssetStreamAdapter`、`VCScreenCaptureSource` 或 `V
 - 支持常见 16/24/32 位有符号整数与 32/64 位浮点 LPCM；
 - 支持单声道/双声道、交错/非交错与 8–192 kHz；
 - 对源 PCM 做线性重采样，单声道使用左右平均；
+- 每个 `BWNodeOutput`/应用音频输出持有独立环形缓冲游标，新 consumer 在实时边缘后保留约 30 ms 抗抖储备，多 Session 不会竞争同一个读位置；
+- 重采样上下文跨回调保留小数相位与前视样本，只消费已经越过的完整 48 kHz 帧，不在每个 callback 重新起相或丢弃插值尾部；
 - 保留原样本附件与呈现时间戳；
 - 压缩或未知格式直接返回原麦克风样本。
 
@@ -115,11 +117,11 @@ Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampl
 
 帧处理采用 latest-frame-wins：一帧处理中只保留一个待处理槽，新帧覆盖旧待处理帧。网络突发或 A10 GPU 短暂繁忙不会形成延迟不断增长的队列。
 
-MJPEG 的 URLSession 回调只做增量边界解析并更新一个“最新完整 JPEG”槽，实际 ImageIO 解码位于独立的高优先级串行队列；解码期间到达的旧帧被新帧覆盖，网络 socket 不等待像素解码。本地文件按媒体 PTS 节奏读取，超过两个目标帧间隔的旧视频帧直接丢弃，音频仍连续推进，避免解码抖动演变成持续音画延迟。
+MJPEG 的 URLSession 回调只做增量边界解析并更新一个“最新完整 JPEG”槽，实际 VideoToolbox/ImageIO 解码位于独立的高优先级串行队列；解码期间到达的旧帧被新帧覆盖，网络 socket 不等待像素解码。硬件 JPEG 会话的瞬时失败只触发 30 秒 ImageIO 冷却，随后自动探测恢复，不会永久锁死 CPU 路径。HLS 的 `AVPlayerItemVideoOutput` 轮询按轨道 nominal FPS 的两倍动态限制在 30–240 Hz。屏幕来源把 UIKit 几何读取异步合并为约 4 Hz，采集队列不再逐帧同步等待 SpringBoard 主线程。本地文件按媒体 PTS 节奏读取，超过两个目标帧间隔的旧视频帧直接丢弃，音频仍连续推进，避免解码抖动演变成持续音画延迟。
 
 本地文件路径同时定义一个目录播放列表：SpringBoard 只枚举同目录内受支持的视频扩展名并自然排序。`SBVolumeControl` 的方法签名在运行时确认为无参数 `void` 后才安装音量键 Hook；音量加选择下一项、音量减选择上一项，并用 350 ms 防抖抑制长按重复。非本地来源、无可切换项目或私有方法不匹配时完整调用原音量实现。
 
-内存压力时清理 VideoToolbox 会话、转换缓存与多余 Surface；严重压力释放音频环。生产者的下一帧会自动重建。停用或切换来源时先停止回调、增加 generation，再清空视频/音频通知，消费者立刻恢复真实相机和麦克风。
+内存压力时清理 VideoToolbox 会话、转换缓存与多余 Surface；严重压力释放音频环。生产者的下一帧会自动重建。停用或切换来源时先停止回调、增加 generation，再清空视频/音频通知，消费者立刻恢复真实相机和麦克风。设置页的“重载当前来源”只写入一个不透明 restart generation，使同一 URL/文件也执行这套原子重建，不改任何画面参数。
 
 ## 身份与元数据边界
 

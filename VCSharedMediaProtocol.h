@@ -15,6 +15,8 @@
 #define VC_SHARED_AUDIO_CHANNELS 2u
 #define VC_SHARED_AUDIO_CAPACITY_FRAMES (VC_SHARED_AUDIO_SAMPLE_RATE * 3u)
 #define VC_SHARED_AUDIO_MAX_LAG_FRAMES (VC_SHARED_AUDIO_SAMPLE_RATE / 4u)
+#define VC_SHARED_AUDIO_TARGET_LEAD_FRAMES \
+    (VC_SHARED_AUDIO_SAMPLE_RATE * 30u / 1000u)
 #define VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY \
     "com.murkaska.virtualcampro.system-replacement.v1"
 #define VC_PIPELINE_HEARTBEAT_MIN_INTERVAL_MS 250u
@@ -63,12 +65,15 @@ static inline size_t VCAudioRingFrameIndex(uint64_t absoluteFrame,
 }
 
 /// Selects the next contiguous read position in the canonical audio ring.
-/// A new/overrun consumer joins at the live edge; an established consumer
-/// advances monotonically and reports underflow instead of replaying samples.
+/// A new/overrun consumer joins with a bounded reservoir behind the live edge;
+/// an established consumer advances monotonically and reports underflow instead
+/// of replaying samples. The reservoir absorbs the mismatch between batched
+/// AVAssetReader PCM delivery and smaller microphone callbacks.
 static inline int VCResolveAudioReadStart(uint64_t endFrame,
                                           size_t requestedFrames,
                                           uint32_t capacityFrames,
                                           uint32_t maximumLagFrames,
+                                          uint32_t targetLeadFrames,
                                           int cursorValid,
                                           uint64_t nextFrame,
                                           uint64_t *startFrameOut) {
@@ -80,7 +85,10 @@ static inline int VCResolveAudioReadStart(uint64_t endFrame,
     if (!cursorValid || nextFrame > endFrame ||
         endFrame - nextFrame > capacityFrames ||
         (maximumLagFrames > 0 && endFrame - nextFrame > maximumLagFrames)) {
-        *startFrameOut = latestStart;
+        size_t desiredLead = targetLeadFrames > requestedFrames
+            ? targetLeadFrames : requestedFrames;
+        if (desiredLead > capacityFrames || endFrame < desiredLead) return 0;
+        *startFrameOut = endFrame - desiredLead;
         return 1;
     }
     if (nextFrame > latestStart) return 0;
@@ -98,6 +106,46 @@ static inline size_t VCRequiredCanonicalInputFrames(size_t outputFrames,
                                  (long double)outputSampleRate);
     if (!isfinite(required) || required > (long double)(SIZE_MAX - 2u)) return 0;
     return (size_t)required + 2u;
+}
+
+/// A streaming resampler retains unread look-ahead samples between callbacks.
+/// This returns the total canonical FIFO occupancy required to render one
+/// output callback from the current fractional source phase.
+static inline size_t VCRequiredStreamingCanonicalFrames(size_t outputFrames,
+                                                         double outputSampleRate,
+                                                         double sourcePhase) {
+    if (outputFrames == 0 || !isfinite(outputSampleRate) ||
+        outputSampleRate <= 0 || !isfinite(sourcePhase) ||
+        sourcePhase < 0 || sourcePhase >= 1.0) {
+        return 0;
+    }
+    long double advance = (long double)sourcePhase +
+        (long double)outputFrames * VC_SHARED_AUDIO_SAMPLE_RATE /
+        (long double)outputSampleRate;
+    if (!isfinite(advance) || advance > (long double)(SIZE_MAX - 2u)) return 0;
+    return (size_t)floorl(advance) + 2u;
+}
+
+/// Advances a streaming resampler without discarding its fractional phase.
+/// `consumedFramesOut` is the number of complete canonical FIFO frames that
+/// may be removed after producing the output callback.
+static inline int VCAdvanceStreamingResamplePhase(size_t outputFrames,
+                                                   double outputSampleRate,
+                                                   double sourcePhase,
+                                                   size_t *consumedFramesOut,
+                                                   double *nextPhaseOut) {
+    if (!consumedFramesOut || !nextPhaseOut) return 0;
+    size_t required = VCRequiredStreamingCanonicalFrames(outputFrames,
+                                                          outputSampleRate,
+                                                          sourcePhase);
+    if (required == 0) return 0;
+    long double advance = (long double)sourcePhase +
+        (long double)outputFrames * VC_SHARED_AUDIO_SAMPLE_RATE /
+        (long double)outputSampleRate;
+    long double complete = floorl(advance);
+    *consumedFramesOut = (size_t)complete;
+    *nextPhaseOut = (double)(advance - complete);
+    return 1;
 }
 
 #endif

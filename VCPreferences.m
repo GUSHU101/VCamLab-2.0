@@ -17,6 +17,7 @@ NSString * const VCLocalMediaPathKey = @"localMediaPath";
 NSString * const VCLoopLocalMediaKey = @"loopLocalMedia";
 NSString * const VCHoldLastFrameKey = @"holdLastFrame";
 NSString * const VCStaleFrameTimeoutKey = @"staleFrameTimeout";
+NSString * const VCSourceRestartTokenKey = @"sourceRestartToken";
 
 static NSString * const VCLegacyPreferencesPath = @"/var/mobile/Library/Preferences/com.apple.avfoundation.cs.plist";
 
@@ -34,6 +35,7 @@ static NSString * const VCLegacyPreferencesPath = @"/var/mobile/Library/Preferen
 @property (atomic, assign, readwrite) BOOL loopLocalMedia;
 @property (atomic, assign, readwrite) BOOL holdLastFrame;
 @property (atomic, assign, readwrite) NSTimeInterval staleFrameTimeout;
+@property (atomic, copy, readwrite) NSString *sourceRestartToken;
 @end
 
 @implementation VCPreferences
@@ -70,6 +72,7 @@ static id VCReadPreference(NSString *key) {
     id loopLocalMediaValue = VCReadPreference(VCLoopLocalMediaKey);
     id holdLastFrameValue = VCReadPreference(VCHoldLastFrameKey);
     id staleFrameTimeoutValue = VCReadPreference(VCStaleFrameTimeoutKey);
+    id sourceRestartTokenValue = VCReadPreference(VCSourceRestartTokenKey);
 
     // Read the original project's preference file as a migration fallback.
     if (!enabledValue || !streamValue) {
@@ -109,6 +112,11 @@ static id VCReadPreference(NSString *key) {
     BOOL holdLastFrame = holdLastFrameValue ? [holdLastFrameValue boolValue] : YES;
     NSTimeInterval staleFrameTimeout = staleFrameTimeoutValue ? [staleFrameTimeoutValue doubleValue] : 8.0;
     staleFrameTimeout = MAX(2.0, MIN(30.0, staleFrameTimeout));
+    NSString *sourceRestartToken = @"";
+    if ([sourceRestartTokenValue isKindOfClass:NSString.class] &&
+        [sourceRestartTokenValue length] <= 128) {
+        sourceRestartToken = sourceRestartTokenValue;
+    }
 
     NSURL *streamURL = nil;
     if ([streamValue isKindOfClass:[NSString class]] && [streamValue length] > 0) {
@@ -149,6 +157,7 @@ static id VCReadPreference(NSString *key) {
                        self.loopLocalMedia != loopLocalMedia ||
                        self.holdLastFrame != holdLastFrame ||
                        fabs(self.staleFrameTimeout - staleFrameTimeout) > DBL_EPSILON ||
+                       ![self.sourceRestartToken isEqualToString:sourceRestartToken] ||
                        !((self.streamURL == streamURL) || [self.streamURL isEqual:streamURL]) ||
                        !((self.localMediaURL == localMediaURL) ||
                          [self.localMediaURL isEqual:localMediaURL]);
@@ -166,6 +175,7 @@ static id VCReadPreference(NSString *key) {
         self.loopLocalMedia = loopLocalMedia;
         self.holdLastFrame = holdLastFrame;
         self.staleFrameTimeout = staleFrameTimeout;
+        self.sourceRestartToken = sourceRestartToken;
         return changed;
     }
 }

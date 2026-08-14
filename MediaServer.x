@@ -46,6 +46,7 @@ static dispatch_once_t VCConversionFailureLogToken;
 static dispatch_once_t VCUnsupportedPixelFormatLogToken;
 static CFStringRef const VCReplacedSampleAttachmentKey =
     CFSTR(VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY);
+static char VCAudioReplacementContextAssociationKey;
 static VCVolumeButtonFunction VCOriginalIncreaseVolume = NULL;
 static VCVolumeButtonFunction VCOriginalDecreaseVolume = NULL;
 static BOOL VCIncreaseVolumeHookInstalled = NO;
@@ -222,6 +223,23 @@ static BOOL VCNodeOutputIsAudio(id object) {
     return ((BOOL (*)(id, SEL))objc_msgSend)(object, VCMediaTypeIsAudioSelector);
 }
 
+static VCAudioReplacementContext *VCAudioContextForNode(id object) {
+    if (!object) return nil;
+    @synchronized (object) {
+        VCAudioReplacementContext *context = objc_getAssociatedObject(
+            object,
+            &VCAudioReplacementContextAssociationKey);
+        if (!context) {
+            context = [VCAudioReplacementContext new];
+            objc_setAssociatedObject(object,
+                                     &VCAudioReplacementContextAssociationKey,
+                                     context,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        return context;
+    }
+}
+
 static NSUInteger VCNodeOutputDispatchIndex(Class runtimeClass) {
     return (((uintptr_t)runtimeClass) >> 4) &
         (VCNodeOutputDispatchCacheSize - 1);
@@ -371,7 +389,8 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
         if (asbd && VCNodeOutputIsAudio(object) &&
             [[VCSharedAudioClient sharedClient] hasPublishedAudioWithMaximumAge:2.0]) {
             CMSampleBufferRef replacement =
-                VCCopyReplacementAudioSampleBuffer(originalBuffer);
+                VCCopyReplacementAudioSampleBuffer(originalBuffer,
+                                                    VCAudioContextForNode(object));
             if (replacement) {
                 CMSetAttachment(replacement,
                                 VCReplacedSampleAttachmentKey,

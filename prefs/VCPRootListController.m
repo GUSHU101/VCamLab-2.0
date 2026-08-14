@@ -4,6 +4,7 @@
 #import <PhotosUI/PhotosUI.h>
 #import <UIKit/UIKit.h>
 #import <limits.h>
+#import <mach/mach_time.h>
 #import <math.h>
 #import <notify.h>
 
@@ -12,6 +13,7 @@
 static CFStringRef const VCPreferencesChangedNotification = CFSTR("com.murkaska.virtualcampro/preferences.changed");
 static CFStringRef const VCPreferencesDomain = CFSTR("com.murkaska.virtualcampro");
 static CFStringRef const VCLocalMediaPathKey = CFSTR("localMediaPath");
+static CFStringRef const VCSourceRestartTokenKey = CFSTR("sourceRestartToken");
 static NSString * const VCLocalMediaDirectory = @"/var/mobile/Media/VirtualCamPro";
 static NSString * const VCLocalMediaImportErrorDomain = @"com.murkaska.virtualcampro.media-import";
 static const unsigned long long VCLocalMediaReserveBytes = 64ULL * 1024ULL * 1024ULL;
@@ -21,6 +23,8 @@ static const char *VCLocalTransformStatusNotificationName =
     "com.murkaska.virtualcampro/local-transform.status";
 static const char *VCLocalVolumeHookStatusNotificationName =
     "com.murkaska.virtualcampro/local-volume-hook.status";
+static const char *VCVideoPipelineHeartbeatNotificationName =
+    "com.murkaska.virtualcampro/pipeline.video.heartbeat.v1";
 static const NSUInteger VCPStreamTestMaximumBytes = 8 * 1024 * 1024;
 
 typedef NS_ENUM(uint64_t, VCPStreamStatus) {
@@ -215,6 +219,24 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
     if (result != NOTIFY_STATUS_OK) return NO;
     if (statusOut) *statusOut = status;
     return YES;
+}
+
+static uint64_t VCPMonotonicMilliseconds(void) {
+    static mach_timebase_info_data_t timebase;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ mach_timebase_info(&timebase); });
+    uint64_t ticks = mach_continuous_time();
+    long double nanos = ((long double)ticks * timebase.numer) / timebase.denom;
+    return (uint64_t)(nanos / 1000000.0L);
+}
+
+static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
+    if (!name || !stateOut) return NO;
+    int token = -1;
+    if (notify_register_check(name, &token) != NOTIFY_STATUS_OK) return NO;
+    uint32_t result = notify_get_state(token, stateOut);
+    notify_cancel(token);
+    return result == NOTIFY_STATUS_OK;
 }
 
 @interface VCPRootListController : PSListController
@@ -421,6 +443,58 @@ static BOOL VCPGetSystemStreamStatus(uint64_t *statusOut) {
     BOOL delta = (state & (1ULL << 2)) != 0;
     if (buttons && delta) return @"已安装：按键 + 增量双路径";
     return buttons ? @"已安装：音量按键路径" : @"已安装：音量增量路径";
+}
+
+- (id)currentSourceRuntimeStatus:(PSSpecifier *)specifier {
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    id enabledValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
+    if (![enabledValue boolValue]) return @"已停用";
+    uint64_t status = VCPStreamStatusDisabled;
+    if (!VCPGetSystemStreamStatus(&status)) return @"SpringBoard 状态不可用";
+    switch (status) {
+        case VCPStreamStatusConnecting: return @"正在初始化 / 重连";
+        case VCPStreamStatusReceiving: return @"正在稳定产帧";
+        case VCPStreamStatusError: return @"来源错误，正在恢复";
+        case VCPStreamStatusHoldingLastFrame: return @"断流，保持最后一帧";
+        default: return @"等待 SpringBoard 接管";
+    }
+}
+
+- (id)currentSystemVideoPipelineStatus:(PSSpecifier *)specifier {
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    id enabledValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
+    if (![enabledValue boolValue]) return @"已停用";
+    uint64_t timestamp = 0;
+    if (!VCPGetNotifyState(VCVideoPipelineHeartbeatNotificationName, &timestamp) ||
+        timestamp == 0) {
+        return @"等待相机应用调用";
+    }
+    uint64_t now = VCPMonotonicMilliseconds();
+    if (now >= timestamp && now - timestamp <= 1500) {
+        return @"mediaserverd 最近已替换视频";
+    }
+    return @"当前无活跃系统视频输出";
+}
+
+- (void)reloadCurrentSource:(PSSpecifier *)specifier {
+    NSString *token = NSUUID.UUID.UUIDString;
+    CFPreferencesSetAppValue(VCSourceRestartTokenKey,
+                             (__bridge CFStringRef)token,
+                             VCPreferencesDomain);
+    if (!CFPreferencesAppSynchronize(VCPreferencesDomain)) {
+        [self showLocalMediaResultWithTitle:@"重载失败"
+                                    message:@"内部重载代次无法保存，请稍后重试。"];
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         VCPreferencesChangedNotification,
+                                         NULL, NULL, YES);
+    _specifiers = nil;
+    [self reloadSpecifiers];
+    [self showLocalMediaResultWithTitle:@"已请求重载"
+                                message:@"SpringBoard 正在原子停止并重建当前来源；URL、本地文件和画面参数均保持不变。"];
 }
 
 - (void)clearLocalMedia:(PSSpecifier *)specifier {

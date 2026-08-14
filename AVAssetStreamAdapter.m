@@ -28,7 +28,8 @@ static const NSUInteger VCMJPEGBufferCompactionThresholdBytes = 1024 * 1024;
 // additional allocations for the decoder/current fan-out so a temporarily slow
 // photo or preview consumer does not force avoidable network-frame loss.
 static const NSUInteger VCMaximumOutstandingMJPEGBuffers = 6;
-static const NSInteger VCHLSPollingFPS = 240;
+static const NSInteger VCHLSInitialPollingFPS = 120;
+static const NSInteger VCHLSMaximumPollingFPS = 240;
 static const CFTimeInterval VCMJPEGStatisticsInterval = 5.0;
 
 typedef struct {
@@ -83,6 +84,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     size_t _mjpegDecoderHeight;
     size_t _mjpegVTDisabledWidth;
     size_t _mjpegVTDisabledHeight;
+    CFAbsoluteTime _mjpegVTDisabledUntil;
     NSUInteger _mjpegVTConsecutiveFailures;
     BOOL _mjpegVTUsesHardware;
     uint64_t _mjpegParsedFrameCount;
@@ -93,6 +95,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     uint64_t _mjpegDecodeFailureCount;
     CFTimeInterval _mjpegTotalDecodeSeconds;
     CFAbsoluteTime _mjpegLastStatisticsTime;
+    NSInteger _hlsPollingFPS;
 }
 @property (nonatomic, strong, readwrite) NSURL *streamURL;
 @property (nonatomic, assign, readwrite) VCStreamProtocol streamProtocol;
@@ -142,6 +145,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
 - (void)reportMalformedMJPEGStream:(NSString *)description;
 - (void)decodePendingMJPEGFrames;
 - (void)catchUpToHLSLiveEdgeIfNeeded;
+- (void)configureHLSFrameTimerForPlayerItem:(AVPlayerItem *)item;
 @end
 
 @implementation AVAssetStreamAdapter
@@ -424,7 +428,8 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     // Poll faster than common source rates. hasNewPixelBufferForItemTime: is the
     // rate gate, so this observes the sender cadence without inventing or dropping
     // frames according to a phone preference.
-    uint64_t interval = NSEC_PER_SEC / (uint64_t)VCHLSPollingFPS;
+    _hlsPollingFPS = VCHLSInitialPollingFPS;
+    uint64_t interval = NSEC_PER_SEC / (uint64_t)_hlsPollingFPS;
     self.frameTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,
                                               0,
                                               0,
@@ -457,6 +462,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
             self.connecting = NO;
             self.reconnectAttempt = 0;
         }
+        [self configureHLSFrameTimerForPlayerItem:item];
         [self.hlsPlayer play];
     } else if (item.status == AVPlayerItemStatusFailed) {
         NSError *error = item.error ?: [NSError errorWithDomain:VCStreamErrorDomain
@@ -520,6 +526,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
         dispatch_source_cancel(self.frameTimer);
         self.frameTimer = nil;
     }
+    _hlsPollingFPS = 0;
     [self.hlsPlayer pause];
     self.hlsLiveEdgeSeekInProgress = NO;
     self.hlsPlayer = nil;
@@ -549,6 +556,9 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     _mjpegDecodeFailureCount = 0;
     _mjpegTotalDecodeSeconds = 0;
     _mjpegLastStatisticsTime = CFAbsoluteTimeGetCurrent();
+    _mjpegVTDisabledWidth = 0;
+    _mjpegVTDisabledHeight = 0;
+    _mjpegVTDisabledUntil = 0;
     self.imageData = [NSMutableData data];
     [self resetMJPEGReceiveBufferLocked];
     os_unfair_lock_unlock(&_mjpegReceiveLock);
@@ -642,8 +652,13 @@ didReceiveResponse:(NSURLResponse *)response
         return YES;
     }
     [self releaseMJPEGDecompressionSession];
-    if ((_mjpegVTDisabledWidth == width && _mjpegVTDisabledHeight == height) ||
-        width == 0 || height == 0 || width > 4096 || height > 4096 ||
+    if (_mjpegVTDisabledWidth == width && _mjpegVTDisabledHeight == height) {
+        if (CFAbsoluteTimeGetCurrent() < _mjpegVTDisabledUntil) return NO;
+        _mjpegVTDisabledWidth = 0;
+        _mjpegVTDisabledHeight = 0;
+        _mjpegVTDisabledUntil = 0;
+    }
+    if (width == 0 || height == 0 || width > 4096 || height > 4096 ||
         width * height > 16000000) {
         return NO;
     }
@@ -657,6 +672,7 @@ didReceiveResponse:(NSURLResponse *)response
     if (formatStatus != noErr || !_mjpegVideoFormatDescription) {
         _mjpegVTDisabledWidth = width;
         _mjpegVTDisabledHeight = height;
+        _mjpegVTDisabledUntil = CFAbsoluteTimeGetCurrent() + 30.0;
         return NO;
     }
 
@@ -689,6 +705,7 @@ didReceiveResponse:(NSURLResponse *)response
         [self releaseMJPEGDecompressionSession];
         _mjpegVTDisabledWidth = width;
         _mjpegVTDisabledHeight = height;
+        _mjpegVTDisabledUntil = CFAbsoluteTimeGetCurrent() + 30.0;
         return NO;
     }
     VTSessionSetProperty(_mjpegDecompressionSession,
@@ -708,10 +725,36 @@ didReceiveResponse:(NSURLResponse *)response
     _mjpegDecoderHeight = height;
     _mjpegVTDisabledWidth = 0;
     _mjpegVTDisabledHeight = 0;
+    _mjpegVTDisabledUntil = 0;
     _mjpegVTConsecutiveFailures = 0;
     NSLog(@"[VirtualCamPro] MJPEG VideoToolbox decoder ready: %zux%zu, hardware=%@",
           width, height, _mjpegVTUsesHardware ? @"yes" : @"no");
     return YES;
+}
+
+- (void)configureHLSFrameTimerForPlayerItem:(AVPlayerItem *)item {
+    if (!item || !self.frameTimer) return;
+    float nominalFPS = 0;
+    for (AVPlayerItemTrack *itemTrack in item.tracks) {
+        AVAssetTrack *assetTrack = itemTrack.assetTrack;
+        if ([assetTrack.mediaType isEqualToString:AVMediaTypeVideo] &&
+            isfinite(assetTrack.nominalFrameRate) && assetTrack.nominalFrameRate > 0) {
+            nominalFPS = MAX(nominalFPS, assetTrack.nominalFrameRate);
+        }
+    }
+    NSInteger pollingFPS = nominalFPS > 0
+        ? (NSInteger)ceil(nominalFPS * 2.0) : VCHLSInitialPollingFPS;
+    pollingFPS = MAX(30, MIN(VCHLSMaximumPollingFPS, pollingFPS));
+    if (_hlsPollingFPS == pollingFPS) return;
+    _hlsPollingFPS = pollingFPS;
+    uint64_t interval = NSEC_PER_SEC / (uint64_t)pollingFPS;
+    dispatch_source_set_timer(self.frameTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 0),
+                              interval,
+                              MAX((uint64_t)1, interval / 10));
+    NSLog(@"[VirtualCamPro] HLS frame polling adapted to %ld Hz (nominal %.2f FPS)",
+          (long)pollingFPS,
+          nominalFPS);
 }
 
 - (void)releaseMJPEGDecompressionSession {
@@ -736,6 +779,10 @@ didReceiveResponse:(NSURLResponse *)response
     [self releaseMJPEGDecompressionSession];
     _mjpegVTDisabledWidth = width;
     _mjpegVTDisabledHeight = height;
+    // Hardware sessions can fail transiently during pressure or decoder
+    // reconfiguration. Use ImageIO briefly, then probe VideoToolbox again
+    // instead of pinning this resolution to CPU decode for the process life.
+    _mjpegVTDisabledUntil = CFAbsoluteTimeGetCurrent() + 30.0;
 }
 
 - (CVPixelBufferRef)copyPixelBufferFromJPEGDataUsingVideoToolbox:(NSData *)jpegData
