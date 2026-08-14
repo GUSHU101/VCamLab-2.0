@@ -2,15 +2,15 @@
     "schemaVersion":  1,
     "toolName":  "VirtualCamPro Windows Control Center",
     "toolVersion":  "2.22.0",
-    "generatedAtUtc":  "2026-08-14T16:46:12.2081579Z",
-    "sourceCommit":  "3a832e18b725ce6842b2912ee7a44f19cb4811cf",
-    "sourceDirty":  true,
+    "generatedAtUtc":  "2026-08-14T16:51:35.6922903Z",
+    "sourceCommit":  "1a93cb215f119031c70e57b8851da2c30697c071",
+    "sourceDirty":  false,
     "packageIncluded":  false,
     "files":  [
                   {
                       "path":  "DEPLOYMENT.md",
-                      "bytes":  8047,
-                      "sha256":  "4C5CFB1E2E06553D172C1675C7137F153ACA7EBE553A78890126136D876676EB",
+                      "bytes":  7921,
+                      "sha256":  "A3E9B379BB696C340321687260979A359DC62000B24E3779B98F58A979B03404",
                       "mutable":  false
                   },
                   {
@@ -99,14 +99,14 @@
                   },
                   {
                       "path":  "WINDOWS_TOOLS.md",
-                      "bytes":  14809,
-                      "sha256":  "F1FCA7638DEB9299809BC717546610FE69253DF19F2762B7BD92D4C14FF5C4DD",
+                      "bytes":  14623,
+                      "sha256":  "21F1B7EEA084D472B7832E80AE965EA85F3B68E3C68AC9041569E9CB4C9A3B12",
                       "mutable":  false
                   },
                   {
                       "path":  "使用说明.txt",
-                      "bytes":  4174,
-                      "sha256":  "C51AF9159D7DB677516F498AB7D779B3AD30530280FEB2157998BBEA28E14D92",
+                      "bytes":  4116,
+                      "sha256":  "8A95AA5949289179B15F47846FB4CD8F2E7376747EEE3516F129DEB49A5C9CC8",
                       "mutable":  false
                   }
               ]
