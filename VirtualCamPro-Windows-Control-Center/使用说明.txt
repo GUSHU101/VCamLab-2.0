@@ -1,0 +1,63 @@
+VirtualCamPro Windows 控制中心 2.24.2 独立配套工具
+最新完整部署教程：DEPLOYMENT.md
+
+一、完整性自检
+首次使用或复制文件后，双击“standalone-self-test.bat”。
+2.24.2 会执行两层检查：
+- 静态完整性：文件清单、重复项、SHA-256、PowerShell 语法、配置边界和双协议参数；
+- 运行级冒烟：GUI/WinForms、核心 SelfTest、本机 HLS GET/HEAD/Range/CORS，以及可用时的 FFmpeg MJPEG/libx264 与真实 HLS 生成测试。
+
+二、图形控制中心
+双击“VirtualCamPro-Windows控制中心.bat”。
+建议按“环境预检 → 选择传输协议 → 一键部署到手机 → 验证安装 → 启动桥接”的顺序操作。
+可选：
+- MJPEG：低延迟，地址 /live.mjpg，带宽较高。
+- HLS / H.264：带宽更低，地址 /live.m3u8，普通 HLS 会增加缓冲延迟。
+手工填写 URL 时会自动检查协议匹配，避免 HLS/MJPEG 地址填反。
+SSH 与 sudo 密码只在独立 OpenSSH 终端中输入，不被界面保存或记录。
+
+三、命令行入口
+- start-obs-vcam.bat：启动 OBS Virtual Camera 网络桥接，支持 MJPEG 或 HLS。
+- start-stream.bat：推送 OBS 或本地视频文件，最后一个参数可选 mjpeg/hls。
+- install-phone.bat：手机预检、安装、配置和验证。
+- standalone-self-test.bat：独立工具完整自检。
+
+示例：
+start-obs-vcam.bat --transport mjpeg
+start-obs-vcam.bat --transport hls
+
+四、环境要求
+- Windows PowerShell 5.1 或更高版本。
+- Windows OpenSSH Client。
+- OBS Studio 与 OBS Virtual Camera。
+- FFmpeg/FFprobe 位于 PATH、C:\ffmpeg\bin，或在 obs-vcam-config.cmd 中指定。
+- HLS 需要 FFmpeg 包含 libx264；标准 Gyan FFmpeg 构建通常已包含。
+- 手机与电脑网络互通，手机 rootless 越狱处于激活状态。
+
+五、安全与完整性
+standalone-manifest.json 记录独立工具内每个交付文件的大小和 SHA-256；
+可编辑的 obs-vcam-config.cmd 只检查是否存在，不会因正常修改配置而锁定工具。
+自检失败时不要继续安装；请重新生成或重新获取完整独立包。
+自定义流 URL 的查询参数可能包含访问令牌，控制中心不会把查询参数写入运行日志。
+
+六、传输模式说明
+MJPEG 默认使用 4 个编码线程、64 MiB DirectShow 短缓冲、4 帧输入队列、3 帧网络 FIFO 和 1 MiB TCP 发送缓冲；拥塞时淘汰旧包而不是积累秒级延迟，同时保留 OBS 原始 FPS和最高质量 1。
+HLS 默认使用 H.264/libx264 ultrafast、0.25 秒分片、6 段实时播放列表和 12 Mbps 目标码率，并写入独立分片标记与节目时间戳，由工具自带 PowerShell HTTP 服务提供 .m3u8 和 .ts 文件。
+正式 iOS 2.24.2 插件由 GitHub Actions 从同一提交构建，同时包含 MJPEG 与 HLS/.m3u8 接收逻辑。
+
+
+【控制中心打不开 / 闪退】
+2.9.2 已修复 GUI 动态提示标签以空文本初始化时触发的 PowerShell 参数绑定失败；同时允许动态标签安全使用空文本。
+2.9.2 起启动器不会再静默吞掉错误。正常双击仍为无控制台界面；如果初始化失败，会弹出错误窗口并写入：
+%LOCALAPPDATA%\VirtualCamPro\logs\control-center-startup.log
+也可以在命令提示符运行：
+VirtualCamPro-Windows控制中心.bat --debug
+用于保留控制台错误信息。首次排查建议运行 standalone-self-test.bat。
+
+【2.24.2 深度自检与稳定性增强】
+- 控制中心新增“深度自检”入口，与 standalone-self-test.bat 使用同一套检查。
+- 旧版 deploy-gui.json 中端口/FPS 非数字、越界值或布尔字段异常时会安全回退，不再导致 GUI 启动崩溃。
+- 完整性清单拒绝重复路径和未授权的 mutable 文件；只有 obs-vcam-config.cmd 可以修改。
+- HLS HTTP 服务增加请求头/URI 长度上限、Range 206/CORS 运行测试及更严格的响应头。
+- LOCALAPPDATA/APPDATA/ProgramFiles/ComSpec 等环境变量异常缺失时增加回退或明确诊断。
+- 子进程超时会安全回收，不会因异步 stdout/stderr 尚未结束再次触发自检异常。
