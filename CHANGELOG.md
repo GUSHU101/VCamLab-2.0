@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.22.0 - 2026-08-15
+
+- Fixed another concrete local-import false-negative path: file providers and Photos may return a temporary URL or suggested name without a usable media suffix. Settings now derives the preferred extension from the URL content type, repairs unknown temporary suffixes and links only the public iOS 15 Uniform Type Identifiers framework.
+- Added a shared fresh-asset retry loader. Import and playback now retry an immediate parse failure or empty-track result once with a new `AVURLAsset`, while retaining one 30-second overall deadline and at most 100 ms cancellation polling instead of multiplying the timeout.
+- Added one bounded local-reader recovery after a transient `AVAssetReader` failure. The stale asset/track geometry cache is discarded before reopening, but a corrupt or unsupported file still fails open after the single retry rather than entering an infinite restart loop.
+- Extended repository validation to require content-type filename repair, fresh-asset retry budgeting, source-switch cancellation and bounded decoder recovery, and re-ran the complete Windows transport/runtime self-test.
+
 ## 2.21.0 - 2026-08-15
 
 - Unified Settings import and SpringBoard playback behind one bounded asynchronous video/audio track loader. Stopping or switching a local source now cancels pending AVFoundation metadata work within the reader lifecycle instead of leaving a stale load to finish later.

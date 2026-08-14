@@ -187,9 +187,13 @@ def validate_preferences() -> None:
             '@"/var/mobile/Media/VirtualCamPro"',
             "NSFileSystemFreeSize",
             "VCAssetContainsRecognizableMediaTracks",
-            "VCMediaLoadTracks",
+            "VCMediaLoadTracksFromURL",
             "VCLocalMediaTrackLoadingTimeout",
             "VCLocalMediaImportErrorTrackLoadingTimeout",
+            "UniformTypeIdentifiers/UniformTypeIdentifiers.h",
+            "NSURLContentTypeKey",
+            "VCPreferredLocalMediaExtension",
+            "VCIsKnownLocalMediaExtension",
             "PHPickerConfigurationAssetRepresentationModeCompatible",
             "CFPreferencesSetAppValue(VCLocalMediaPathKey",
             "picker.allowsMultipleSelection = YES",
@@ -251,6 +255,10 @@ def validate_preferences() -> None:
             "NSProcessInfo.processInfo.systemUptime",
             "[asset cancelLoading]",
             "VCMediaLoadVideoTrackGeometry",
+            "VCMediaLoadTracksFromURL",
+            "VCMediaWaitForRetryDelay",
+            "maximumAttempts",
+            "fresh asset",
             'loadValuesAsynchronouslyForKeys:@[@"preferredTransform", @"naturalSize"]',
             'statusOfValueForKey:@"preferredTransform"',
             'statusOfValueForKey:@"naturalSize"',
@@ -281,6 +289,8 @@ def validate_preferences() -> None:
                  legacy_dashboard_symbol)
     if "QuartzCore" in bundle_makefile:
         fail("preference bundle must not require the optional QuartzCore dashboard")
+    if "UniformTypeIdentifiers" not in bundle_makefile:
+        fail("preference bundle must link media filename type inference")
     specifier_loader = controller.split("- (NSArray *)specifiers", 1)[1].split(
         "- (void)setPreferenceValue:", 1
     )[0]
@@ -489,9 +499,9 @@ def validate_zero_copy_bus() -> None:
             "VCLocalMediaCompletionCallback",
             "reachedNaturalEnd",
             '#import "VCMediaTrackLoader.h"',
-            "VCMediaLoadTracks",
+            "VCMediaLoadTracksFromURL",
             "VCMediaTrackLoadResultCancelled",
-            "self.loadingAsset = asset",
+            "self.loadingAsset = observedAsset",
             "[loadingAsset cancelLoading]",
             "self.preparedAsset = asset",
             "VCMediaLoadVideoTrackGeometry",
@@ -499,6 +509,9 @@ def validate_zero_copy_bus() -> None:
             "self.preparedTrackTransform = preferredTransform",
             "self.preparedTrackNaturalSize = naturalSize",
             "self.preparedTrackGeometryReady = geometryReady",
+            "consecutiveReadFailures",
+            "Retrying local media after a transient read error",
+            "VCMediaWaitForRetryDelay(0.20",
         ),
         "local media producer",
     )
