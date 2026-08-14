@@ -9,6 +9,22 @@ static void testSurfaceStateRoundTrip(void) {
     assert(VCSurfaceIDFromState(state) == 0xfedcba98u);
 }
 
+static void testPipelineHeartbeatRateLimit(void) {
+    assert(!VCShouldPublishPipelineHeartbeat(0, 0));
+    assert(VCShouldPublishPipelineHeartbeat(1000, 0));
+    assert(!VCShouldPublishPipelineHeartbeat(1249, 1000));
+    assert(VCShouldPublishPipelineHeartbeat(1250, 1000));
+    assert(VCShouldPublishPipelineHeartbeat(999, 1000));
+}
+
+static void testMediaTimestampRateLimit(void) {
+    assert(!VCShouldPublishMediaTimestamp(0, 0));
+    assert(VCShouldPublishMediaTimestamp(2000, 0));
+    assert(!VCShouldPublishMediaTimestamp(2099, 2000));
+    assert(VCShouldPublishMediaTimestamp(2100, 2000));
+    assert(VCShouldPublishMediaTimestamp(1999, 2000));
+}
+
 static void testAudioRingWrap(void) {
     assert(VCAudioRingFrameIndex(0, 8) == 0);
     assert(VCAudioRingFrameIndex(7, 8) == 7);
@@ -46,6 +62,8 @@ static void testResampleInputBounds(void) {
 
 int main(void) {
     testSurfaceStateRoundTrip();
+    testPipelineHeartbeatRateLimit();
+    testMediaTimestampRateLimit();
     testAudioRingWrap();
     testAudioReadCursor();
     testResampleInputBounds();

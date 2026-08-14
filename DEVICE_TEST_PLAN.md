@@ -18,6 +18,7 @@
 - 将来源设为“网络 HLS / MJPEG”，填写可持续输出的地址，再启用画面替换；随后分别测试屏幕镜像、本地视频和纯 MP3。
 - 完全退出相机相关应用后重新打开。
 - 日志出现 `mediaserverd BWNodeOutput hooks installed` 且 class 数量至少为 1；收到来源后只记录一次 `SpringBoard published first shared frame`，且尺寸符合来源与旋转设置。
+- 同时运行两个独立 CaptureSession（优先 Camera + Safari/WebKit `getUserMedia`）：反复启动/停止其中一个 50 次，另一个必须持续显示替换帧。任何单一节点成功都不得导致另一路真实帧穿透；这项专门验证逐样本证据替代全局 heartbeat 门控。
 - 关闭画面替换时，以下所有模式必须保持真实相机原有行为，作为对照基线。
 - 网络源使用带方向标记和左右文字的画面，在手机上改变本地旋转/镜像/FPS/质量设置，网络输出必须完全不变；方向只能随 OBS/Windows 端调整。
 - 本地文件依次验证 0°、90°、180°、270°、水平镜像、1280/1920/2560/3840 质量和 FPS 上限；设置改变后旧方向帧必须立即消失。
@@ -86,7 +87,9 @@
 - 提供只建立 HTTP 连接但不发送 JPEG 的端点：约 15 秒出现首帧超时日志并重连。
 - 切换流 URL 后不得再次出现上一个 URL 的画面。
 - 连续预览 15 分钟并同时运行高内存应用；出现 `Released conversion caches` 后下一网络帧应自动恢复，`mediaserverd` 不得进入崩溃循环。
+- 同时打开多个视频输出节点连续运行 60 分钟，记录 `mediaserverd` 与目标应用的 footprint/IOSurface 数量；预热后应围绕固定池上下波动，不能随 cache race 次数单调增长。结束所有 CaptureSession 后再次采样，确认 wrapper lease 已回收。
 - 在 1080p60 下短时制造 Wi-Fi 抖动或 JPEG 解码压力；接收线程不得被 ImageIO 解码阻塞，恢复后必须在短队列范围内追上最新帧，不能继续播放秒级旧 FIFO。
+- 收集 `Slow pixel transfer` 日志中的 `wait/transfer/total`：1080p60 的持续 `total` 不应反复超过 16.67 ms；如果 `wait` 明显高于 `transfer`，优先检查多节点争用，如果 `transfer` 本身超预算，则记录具体尺寸/像素格式并降低真机验收目标，不能仅凭源码支持项宣称 4K/120/240 FPS 已达标。
 
 ## 保留诊断证据
 
@@ -97,4 +100,4 @@ log show --last 15m --style compact \
 ls -lt /var/mobile/Library/Logs/CrashReporter/ | head -20
 ```
 
-每个失败项目记录：模式、前/后摄或 1×/2×、横竖屏、目标分辨率/帧率、源协议、源分辨率、首个转换失败日志以及是否生成可打开的照片或视频。仅凭 CI 编译通过不能替代这份真机验收。
+每个失败项目记录：模式、前/后摄或 1×/2×、横竖屏、目标分辨率/帧率、源协议、源分辨率、首个转换失败日志、同时存在的 CaptureSession 数量、运行前后 footprint/IOSurface 变化，以及是否生成可打开的照片或视频。仅凭 CI 编译通过不能证明 iOS 15.8.8 的私有 CMCapture 图与假设一致，也不能替代这份真机验收。

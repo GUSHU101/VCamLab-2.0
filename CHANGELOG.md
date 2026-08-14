@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.13.0 - 2026-08-14
+
+- Replaced the process-global system-heartbeat fallback gate with propagating per-sample and per-pixel-buffer evidence, then scoped compatibility-preview state to each `AVCaptureVideoDataOutput` inside its own `AVCaptureSession`; success in one camera graph can no longer suppress another graph's fallback.
+- Made the IOSurface cache-race ownership transition explicit: the cache winner receives its own use-count lease before the losing wrapper's lease is retired, with repository invariants covering the balanced handoff.
+- Reused six Darwin notify tokens for each process lifetime, removed media-bus `notify_post` calls, limited freshness state writes to 10 Hz, made the audio Surface state one-shot per ring, and limited diagnostic pipeline heartbeats to 4 Hz.
+- Split frame cache/pool locking from the serialized VideoToolbox session lane, added a post-wait cache recheck so sibling nodes do not duplicate the same conversion, and rate-limited telemetry that separates session wait time from actual pixel-transfer time.
+- Expanded the iPhone 7 Plus/iOS 15.8.8 device plan with concurrent-session isolation, one-hour IOSurface/footprint stability, and frame-budget evidence; CI compilation remains explicitly distinct from private `BWNodeOutput` device validation.
+
 ## 2.12.0 - 2026-08-14
 
 - Applied each local asset track's `preferredTransform` before the user's 0°/90°/180°/270° control, then combined both rotations and mirrors into one GPU render instead of silently treating encoded portrait pixels as upright.

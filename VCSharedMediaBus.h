@@ -49,9 +49,10 @@ FOUNDATION_EXPORT void VCReleaseSharedVideoPixelBuffer(
 - (BOOL)hasPublishedAudioWithMaximumAge:(NSTimeInterval)maximumAge;
 @end
 
-/// The low-level hook publishes a short heartbeat only after a replacement was
-/// actually emitted. Application hooks use it for automatic failover, removing
-/// the old user-facing "compatibility mode" switch.
+/// The low-level hook publishes a rate-limited process-global health signal
+/// only after a replacement was emitted. This is diagnostic state only:
+/// application fallbacks must use per-sample replacement evidence rather than
+/// letting activity in one capture graph suppress another graph.
 FOUNDATION_EXPORT void VCMarkSystemPipelineActivity(VCSharedMediaKind kind);
 FOUNDATION_EXPORT BOOL VCSystemPipelineIsActive(VCSharedMediaKind kind,
                                                 NSTimeInterval maximumAge);

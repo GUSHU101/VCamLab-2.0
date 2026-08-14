@@ -57,10 +57,10 @@ SpringBoard 实例负责 `AVAssetStreamAdapter`、`VCScreenCaptureSource` 或 `V
 生产者要求所有输出缓冲带 `kCVPixelBufferIOSurfacePropertiesKey` 与 `kIOSurfaceIsGlobal`。发布时只做三件事：
 
 1. 在 3 槽环中 retain 当前 `CVPixelBuffer`，让消费者跨帧调度时仍能 lookup。
-2. 通过 notify state 发布 32 位 generation 与 32 位 `IOSurfaceID`。
-3. 单独发布 `mach_continuous_time` 毫秒值，用于旧帧策略和进程首次连接时的真实新鲜度判断。
+2. 通过 notify state 发布 32 位 generation 与 32 位 `IOSurfaceID`，每个进程长期复用固定注册 token。
+3. 单独写入 `mach_continuous_time` 毫秒状态，用于旧帧策略和进程首次连接时的真实新鲜度判断；时间戳最多 10 Hz。媒体消费者本来就在相机回调/显示时钟中主动 `notify_get_state`，没有任何事件订阅者，因此共享总线只更新 64 位 state，不再调用 `notify_post`；音频 Surface 建立后依靠环内原子写指针推进，也不再为每个 PCM chunk 重写相同 Surface ID。
 
-消费者调用 `IOSurfaceLookup`，再用 `CVPixelBufferCreateWithIOSurface` 包装同一 Surface。该步骤只创建 CoreVideo 包装对象，不复制像素。包装对象按完整的 `generation + IOSurfaceID` 控制字缓存：同一帧经过多个相机输出节点时复用同一指针，从而命中像素转换缓存；同一 Surface 槽被新 generation 复用时一定创建新包装，不能误用上一轮转换结果。控制字在 lookup 前后不一致时最多重试三次。
+消费者调用 `IOSurfaceLookup`，再用 `CVPixelBufferCreateWithIOSurface` 包装同一 Surface。该步骤只创建 CoreVideo 包装对象，不复制像素。返回给调用方的每个 wrapper 都拥有一个明确的 `IOSurfaceIncrementUseCount` lease，并且只能用 `VCReleaseSharedVideoPixelBuffer` 对称归还。并发线程争用同一缓存项时，代码先给缓存胜者增加自己的 lease，再归还落败 wrapper 的 lease，不依赖隐式所有权转移。包装对象按完整的 `generation + IOSurfaceID` 控制字缓存：同一帧经过多个相机输出节点时复用同一指针，从而命中像素转换缓存；同一 Surface 槽被新 generation 复用时一定创建新包装，不能误用上一轮转换结果。控制字在 lookup 前后不一致时最多重试三次。
 
 源缓冲如果没有 IOSurface 会直接丢弃并保留真实相机，而不是退化成未限制的 CPU 拷贝。HLS、MJPEG、本地视频、屏幕捕获和本地方向变换的池都显式创建全局 IOSurface。
 
@@ -80,7 +80,7 @@ SpringBoard 实例负责 `AVAssetStreamAdapter`、`VCScreenCaptureSource` 或 `V
 
 ## 系统媒体图替换
 
-Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampleBuffer:` 的子类，避免专用照片/录像输出类绕过基类实现。已替换样本带一个不向下游传播的临时 attachment；如果子类原实现再调用父类，父类 Hook 看到标记后直接放行，防止重复转换。每个候选类还要检查：
+Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampleBuffer:` 的子类，避免专用照片/录像输出类绕过基类实现。已替换样本带可传播的 sample/pixel-buffer attachment：同一系统图中的后续 Hook 看到标记后直接放行，应用层也能把“这个具体样本已替换”作为旁路证据；若中间私有节点丢弃未知 attachment，应用层会保守地再次执行 fallback，而不会泄露真实帧。每个候选类还要检查：
 
 - `BWNodeOutput` 类和 `emitSampleBuffer:` 存在；
 - 参数数量为 3，返回值为 `void`，第三个参数为指针；
@@ -95,19 +95,19 @@ Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampl
 
 视频由 `VTPixelTransferSession` 转成真实相机节点要求的宽、高、像素格式和缩放方式。只有 `CMVideoFormatDescriptionMatchesImageBuffer` 成功时才复用原描述，否则从新缓冲创建匹配描述。原样本 timing 与可传播 attachments 会复制到替换样本。
 
-同一源帧经过多个输出节点时，转换器按源 Surface、目标宽高、像素格式、缩放方式和格式描述语义复用结果；固定容量池限制每种格式最多 6 个在途缓冲，避免 A10 上的扇出分配失控。
+同一源帧经过多个输出节点时，转换器按源 Surface、目标宽高、像素格式、缩放方式和格式描述语义复用结果；固定容量池限制每种格式最多 6 个在途缓冲，避免 A10 上的扇出分配失控。池/缓存状态锁与 `VTPixelTransferSession` 串行 lane 已拆开：缓存命中和池操作不再等待另一节点的 GPU 转换；等待 session 的线程获得 lane 后会二次查缓存，避免重复转换。PixelTransfer 本身仍是同步调用，4K、高帧率和多输出能力必须以 A10 真机测量为准。
 
 ## 自动回退而不是手动模式
 
-系统 Hook 只有在替换样本成功交给原 `emitSampleBuffer:` 前才发布视频或音频心跳。应用 Hook 的规则是：
+系统 Hook 只有在替换样本成功交给原 `emitSampleBuffer:` 后才更新视频或音频健康状态；全局状态最多 4 Hz，仅供诊断，绝不作为 fallback 正确性条件。应用 Hook 的规则是：
 
-- 1.5 秒内有对应系统心跳：完全旁路，不二次转换；
-- 没有心跳但共享媒体有效：代理 `AVCaptureVideoDataOutput` 或 `AVCaptureAudioDataOutput`；
-- 预览层只在应用视频回退时使用 IOSurface contents；
+- 当前 `CMSampleBuffer` 带系统替换 attachment：只旁路这个具体样本；
+- 当前样本没有证据但共享媒体有效：代理 `AVCaptureVideoDataOutput` 或 `AVCaptureAudioDataOutput`；
+- 预览层使用共享 IOSurface contents，不受其他 session 的系统健康状态影响；
 - 照片回退锁定同一源帧，保留并读回核验真实 TIFF/EXIF/GPS/Apple 元数据；
 - 任何转换、编码或元数据核验失败：调用原 API/返回原文件。
 
-这套协商不需要设置开关。私有系统节点在某个 iOS 小版本不存在时，目标应用只要使用标准 AVFoundation 数据输出/照片接口就会自动接管；`AVCaptureMovieFileOutput` 等无法由公开应用接口完整替代的路径仍依赖系统 Hook。
+这套协商不需要设置开关，也不会再出现 Session A 的成功心跳全局关闭 Session B fallback。私有系统节点在某个 iOS 小版本不存在时，目标应用只要使用标准 AVFoundation 数据输出/照片接口就会自动接管；`AVCaptureMovieFileOutput` 等无法由公开应用接口完整替代的路径仍依赖系统 Hook。
 
 ## 来源生命周期
 
@@ -136,5 +136,8 @@ MJPEG 的 URLSession 回调只做增量边界解析并更新一个“最新完�
 - [Theos rootless](https://theos.dev/docs/rootless)
 - [Cydia Substrate Darwin deployment](https://www.cydiasubstrate.com/inject/darwin/)
 - [Apple TN3121：选择相机输出像素格式](https://developer.apple.com/documentation/technotes/tn3121-selecting-a-pixel-format-for-an-avcapturevideodataoutput)
+- [Apple CoreMedia：可传播 attachment](https://developer.apple.com/documentation/coremedia/kcmattachmentmode_shouldpropagate)
+- [Apple VideoToolbox：VTPixelTransferSessionTransferImage](https://developer.apple.com/documentation/videotoolbox/vtpixeltransfersessiontransferimage(_:from:to:))
+- [Apple Darwin notify：notify_register_check](https://developer.apple.com/documentation/darwinnotify/notify_register_check(_:_:))
 - [MurkAskA01/ios-vcam](https://github.com/MurkAskA01/ios-vcam)
 - [donets2013/MyVcam](https://github.com/donets2013/MyVcam)

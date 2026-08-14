@@ -47,7 +47,7 @@ log stream --style compact --predicate 'eventMessage CONTAINS "VirtualCamPro"'
 [VirtualCamPro] mediaserverd BWNodeOutput hooks installed (... classes, video typed, audio typed)
 ```
 
-若出现 `unavailable on this iOS build`，应用层回退会在系统心跳消失后自动接管，无需切换设置。完全退出并重开目标应用；`AVCaptureMovieFileOutput` 等无法完整回退的路径需要针对该 iOS 小版本适配系统 Hook。
+若出现 `unavailable on this iOS build`，标准 AVFoundation 数据输出会在当前样本没有系统替换证据时立即执行应用层回退，无需等待全局心跳或切换设置。完全退出并重开目标应用；`AVCaptureMovieFileOutput` 等无法完整回退的路径需要针对该 iOS 小版本适配系统 Hook。
 
 日志中 `video typed, audio typed` 表示已验证并使用 `BWNodeOutput` 的媒体类型过滤。`Preserving non-color ...` 只记录一次，表示某个深度/视差或未知像素输出被安全透传；若普通前后摄像头始终不替换，记录该数值以便在实机确认后扩充支持列表。
 

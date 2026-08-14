@@ -45,9 +45,6 @@ typedef NS_ENUM(uint64_t, VCStreamStatus) {
     NSInteger _pendingTrackRotation;
     BOOL _pendingTrackMirror;
     BOOL _frameProcessingScheduled;
-    CVPixelBufferRef _latestCompatibilityOutputPixelBuffer;
-    CFAbsoluteTime _latestCompatibilityOutputTime;
-    BOOL _compatibilityOutputPathActive;
     int _streamStatusToken;
     int _localTransformStatusToken;
     BOOL _localTransformStatusNeedsPublish;
@@ -64,6 +61,7 @@ typedef NS_ENUM(uint64_t, VCStreamStatus) {
 @property (nonatomic, copy) NSString *activeSourceIdentity;
 @property (nonatomic, strong) dispatch_queue_t frameProcessingQueue;
 @property (nonatomic, strong) dispatch_source_t memoryPressureSource;
+- (void)clearPendingFrames;
 @end
 
 static BOOL VCURLHasSupportedLocalVideoExtension(NSURL *url) {
@@ -242,7 +240,7 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
             }
         }
         if (pressure & DISPATCH_MEMORYPRESSURE_CRITICAL) {
-            [strongSelf clearPendingAndCompatibilityFrames];
+            [strongSelf clearPendingFrames];
         }
     });
     self.memoryPressureSource = source;
@@ -664,64 +662,23 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     os_unfair_lock_lock(&_stateLock);
     _sourceGeneration++;
     os_unfair_lock_unlock(&_stateLock);
-    [self clearPendingAndCompatibilityFrames];
+    [self clearPendingFrames];
     [[VCSharedVideoServer sharedServer] invalidate];
     [[VCSharedAudioServer sharedServer] invalidate];
 }
 
-- (void)clearPendingAndCompatibilityFrames {
+- (void)clearPendingFrames {
     CVPixelBufferRef pending = NULL;
-    CVPixelBufferRef compatibility = NULL;
     os_unfair_lock_lock(&_stateLock);
     pending = _pendingPixelBuffer;
-    compatibility = _latestCompatibilityOutputPixelBuffer;
     _pendingPixelBuffer = NULL;
     _pendingTrackRotation = 0;
     _pendingTrackMirror = NO;
-    _latestCompatibilityOutputPixelBuffer = NULL;
-    _latestCompatibilityOutputTime = 0;
-    _compatibilityOutputPathActive = NO;
     _loggedFirstFrame = NO;
     _loggedStaleFrame = NO;
     os_unfair_lock_unlock(&_stateLock);
     if (pending) CVPixelBufferRelease(pending);
-    if (compatibility) CVPixelBufferRelease(compatibility);
     VCResetFrameConverterCache();
-}
-
-- (void)publishCompatibilityOutputPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    CVPixelBufferRef retained = pixelBuffer ? CVPixelBufferRetain(pixelBuffer) : NULL;
-    CVPixelBufferRef retired = NULL;
-    os_unfair_lock_lock(&_stateLock);
-    retired = _latestCompatibilityOutputPixelBuffer;
-    _latestCompatibilityOutputPixelBuffer = retained;
-    _latestCompatibilityOutputTime = CFAbsoluteTimeGetCurrent();
-    _compatibilityOutputPathActive = YES;
-    os_unfair_lock_unlock(&_stateLock);
-    if (retired) CVPixelBufferRelease(retired);
-}
-
-- (CVPixelBufferRef)copyLatestCompatibilityOutputPixelBufferWithActivePath:
-    (BOOL *)activePath {
-    CVPixelBufferRef result = NULL;
-    CVPixelBufferRef stale = NULL;
-    os_unfair_lock_lock(&_stateLock);
-    BOOL recent = _replacementEnabled && _compatibilityOutputPathActive &&
-        _latestCompatibilityOutputTime > 0 &&
-        CFAbsoluteTimeGetCurrent() - _latestCompatibilityOutputTime <= 2.0;
-    if (!recent && _compatibilityOutputPathActive) {
-        stale = _latestCompatibilityOutputPixelBuffer;
-        _latestCompatibilityOutputPixelBuffer = NULL;
-        _latestCompatibilityOutputTime = 0;
-        _compatibilityOutputPathActive = NO;
-    }
-    if (activePath) *activePath = recent;
-    if (recent && _latestCompatibilityOutputPixelBuffer) {
-        result = CVPixelBufferRetain(_latestCompatibilityOutputPixelBuffer);
-    }
-    os_unfair_lock_unlock(&_stateLock);
-    if (stale) CVPixelBufferRelease(stale);
-    return result;
 }
 
 - (CVPixelBufferRef)copyLatestPixelBuffer {
@@ -813,7 +770,7 @@ static void VCPreferencesDidChange(CFNotificationCenterRef center,
     CFNotificationCenterRemoveEveryObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                             (__bridge const void *)self);
     if (_producerProcess) [self stopAllSourcesAndInvalidateBus];
-    else [self clearPendingAndCompatibilityFrames];
+    else [self clearPendingFrames];
     if (self.memoryPressureSource) dispatch_source_cancel(self.memoryPressureSource);
     if (_streamStatusToken >= 0) notify_cancel(_streamStatusToken);
     if (_localTransformStatusToken >= 0) notify_cancel(_localTransformStatusToken);

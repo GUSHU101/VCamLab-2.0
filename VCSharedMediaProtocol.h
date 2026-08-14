@@ -12,6 +12,10 @@
 #define VC_SHARED_AUDIO_CHANNELS 2u
 #define VC_SHARED_AUDIO_CAPACITY_FRAMES (VC_SHARED_AUDIO_SAMPLE_RATE * 3u)
 #define VC_SHARED_AUDIO_MAX_LAG_FRAMES (VC_SHARED_AUDIO_SAMPLE_RATE / 4u)
+#define VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY \
+    "com.murkaska.virtualcampro.system-replacement.v1"
+#define VC_PIPELINE_HEARTBEAT_MIN_INTERVAL_MS 250u
+#define VC_MEDIA_TIMESTAMP_MIN_INTERVAL_MS 100u
 
 static inline uint64_t VCPackSurfaceState(uint32_t generation, uint32_t surfaceID) {
     return ((uint64_t)generation << 32) | (uint64_t)surfaceID;
@@ -23,6 +27,25 @@ static inline uint32_t VCGenerationFromSurfaceState(uint64_t state) {
 
 static inline uint32_t VCSurfaceIDFromState(uint64_t state) {
     return (uint32_t)(state & UINT32_MAX);
+}
+
+/// Pipeline heartbeats are diagnostics, not an application-fallback gate. A
+/// four-Hz update is enough for a 1.5-second health window and avoids one
+/// mediaserverd notify state write for every emitted camera sample.
+static inline int VCShouldPublishPipelineHeartbeat(uint64_t nowMilliseconds,
+                                                   uint64_t lastMilliseconds) {
+    if (nowMilliseconds == 0) return 0;
+    if (lastMilliseconds == 0 || nowMilliseconds < lastMilliseconds) return 1;
+    return nowMilliseconds - lastMilliseconds >=
+        VC_PIPELINE_HEARTBEAT_MIN_INTERVAL_MS;
+}
+
+static inline int VCShouldPublishMediaTimestamp(uint64_t nowMilliseconds,
+                                                uint64_t lastMilliseconds) {
+    if (nowMilliseconds == 0) return 0;
+    if (lastMilliseconds == 0 || nowMilliseconds < lastMilliseconds) return 1;
+    return nowMilliseconds - lastMilliseconds >=
+        VC_MEDIA_TIMESTAMP_MIN_INTERVAL_MS;
 }
 
 static inline size_t VCAudioRingFrameIndex(uint64_t absoluteFrame,

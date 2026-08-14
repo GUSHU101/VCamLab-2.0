@@ -38,7 +38,7 @@ install-phone.bat 192.168.0.103
 工具按修改时间选择 `packages/` 或 `artifacts/` 中最新的 `com.murkaska.virtualcampro_*_iphoneos-arm64.deb`，显示本地 SHA-256，通过 SCP 复制到 `/var/mobile`，再在手机端核对上传字节数和完整 SHA-256，并由 `dpkg-deb` 验证包内 ID、版本和架构。只有全部一致才会使用 `mobile + sudo dpkg` 安装；无论验证或安装在哪一步失败，临时上传都会自动清理。也可以显式指定安装包和端口：
 
 ```bat
-install-phone.bat 192.168.0.103 "D:\Packages\com.murkaska.virtualcampro_2.12.0_iphoneos-arm64.deb" 22
+install-phone.bat 192.168.0.103 "D:\Packages\com.murkaska.virtualcampro_2.13.0_iphoneos-arm64.deb" 22
 ```
 
 希望安装后自动写入手机 URL 和启用替换时使用：
@@ -187,7 +187,7 @@ install-phone.bat --self-test
 standalone-self-test.bat
 ```
 
-2.12.0 的聚合自检依次验证清单/重复路径/不可变文件 SHA-256、全部 PowerShell AST 语法、配置取值边界、OBS WebSocket 认证、手机安装命令、GUI 参数构造与旧配置迁移、WinForms 冒烟启动，并实际启动本机 HLS HTTP 服务验证 GET、HEAD、Range 206 与 OPTIONS/CORS。检测到 FFmpeg 时，还会同时确认 MJPEG 与 `libx264` 编码器，并实际生成临时 H.264 HLS 分片。环境组件缺失属于 `[WARN]`，结构或运行级错误属于 `[FAIL]`。
+2.13.0 的聚合自检依次验证清单/重复路径/不可变文件 SHA-256、全部 PowerShell AST 语法、配置取值边界、OBS WebSocket 认证、手机安装命令、GUI 参数构造与旧配置迁移、WinForms 冒烟启动，并实际启动本机 HLS HTTP 服务验证 GET、HEAD、Range 206 与 OPTIONS/CORS。检测到 FFmpeg 时，还会同时确认 MJPEG 与 `libx264` 编码器，并实际生成临时 H.264 HLS 分片。环境组件缺失属于 `[WARN]`，结构或运行级错误属于 `[FAIL]`。
 
 ## 生成独立配套工具
 
@@ -195,7 +195,7 @@ standalone-self-test.bat
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-windows-standalone.ps1 `
-  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.12.0_iphoneos-arm64.deb" `
+  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.13.0_iphoneos-arm64.deb" `
   -CreateZip
 ```
 

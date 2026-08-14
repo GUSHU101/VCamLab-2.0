@@ -13,6 +13,7 @@
 #import "VCAudioSampleConverter.h"
 #import "VCFrameConverter.h"
 #import "VCSharedMediaBus.h"
+#import "VCSharedMediaProtocol.h"
 #import "VCStreamCoordinator.h"
 
 typedef void (*VCEmitSampleBufferFunction)(id, SEL, CMSampleBufferRef);
@@ -36,7 +37,7 @@ static SEL VCMediaTypeIsAudioSelector = NULL;
 static dispatch_once_t VCConversionFailureLogToken;
 static dispatch_once_t VCUnsupportedPixelFormatLogToken;
 static CFStringRef const VCReplacedSampleAttachmentKey =
-    CFSTR("com.murkaska.virtualcampro.system-replacement.v1");
+    CFSTR(VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY);
 static VCVolumeButtonFunction VCOriginalIncreaseVolume = NULL;
 static VCVolumeButtonFunction VCOriginalDecreaseVolume = NULL;
 static BOOL VCIncreaseVolumeHookInstalled = NO;
@@ -277,7 +278,15 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
                 CMSetAttachment(replacement,
                                 VCReplacedSampleAttachmentKey,
                                 kCFBooleanTrue,
-                                kCMAttachmentMode_ShouldNotPropagate);
+                                kCMAttachmentMode_ShouldPropagate);
+                CVPixelBufferRef replacementPixelBuffer =
+                    CMSampleBufferGetImageBuffer(replacement);
+                if (replacementPixelBuffer) {
+                    CVBufferSetAttachment(replacementPixelBuffer,
+                                          VCReplacedSampleAttachmentKey,
+                                          kCFBooleanTrue,
+                                          kCVAttachmentMode_ShouldPropagate);
+                }
             }
             originalEmit(object, selector, replacement ?: originalBuffer);
             if (replacement) {
@@ -298,7 +307,7 @@ static void VCMediaServerEmitSampleBuffer(id object, SEL selector, CMSampleBuffe
                 CMSetAttachment(replacement,
                                 VCReplacedSampleAttachmentKey,
                                 kCFBooleanTrue,
-                                kCMAttachmentMode_ShouldNotPropagate);
+                                kCMAttachmentMode_ShouldPropagate);
             }
             originalEmit(object, selector, replacement ?: originalBuffer);
             if (replacement) {

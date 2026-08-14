@@ -1,16 +1,16 @@
 ﻿{
     "schemaVersion":  1,
     "toolName":  "VirtualCamPro Windows Control Center",
-    "toolVersion":  "2.12.0",
-    "generatedAtUtc":  "2026-08-14T09:48:43.5458140Z",
-    "sourceCommit":  "19336801ee6164609f4fd96c2cb88ceab9e30509",
+    "toolVersion":  "2.13.0",
+    "generatedAtUtc":  "2026-08-14T10:10:27.5327961Z",
+    "sourceCommit":  "f61e94332ab3f5875810b5ba05762d7f8d70feb6",
     "sourceDirty":  true,
     "packageIncluded":  false,
     "files":  [
                   {
                       "path":  "DEPLOYMENT.md",
-                      "bytes":  8052,
-                      "sha256":  "B9C7B3A8A7ECE2AE6CB254A5853085B4F512357BBE7851BD9FD9FE6FC6D87CD6",
+                      "bytes":  8050,
+                      "sha256":  "E7E33F57594B56F826FE2E99485042B1175B79375D1C1362211A60DF53920797",
                       "mutable":  false
                   },
                   {
@@ -28,7 +28,7 @@
                   {
                       "path":  "scripts\\deep-self-test.ps1",
                       "bytes":  39219,
-                      "sha256":  "388039AF06C40E745B47360CE698D1366D47F8D4031AA2527CE6BDB810290F5A",
+                      "sha256":  "3A2467A99F534A0137677A34ADC7A5FA254C1623155BFDCEC07B082DF8C3EF19",
                       "mutable":  false
                   },
                   {
@@ -40,13 +40,13 @@
                   {
                       "path":  "scripts\\install-ios.ps1",
                       "bytes":  30353,
-                      "sha256":  "C67D62D72115AD1EF9E18B9E6F367E8EF78C2224115AD033DB15C8C548712EAF",
+                      "sha256":  "74222DC92CFE63323A33897183A15C2A0ACE04CDE9A1531AADF67CD01EF03A00",
                       "mutable":  false
                   },
                   {
                       "path":  "scripts\\install-ios-gui.ps1",
                       "bytes":  44052,
-                      "sha256":  "C5A17A3E11BE9D20B8B55DBE57F6BAE34B30296656C66D30103E2B303AB3319C",
+                      "sha256":  "D32F7F5BEB3099652C21DB9D1FED9B15A56D8AAD9923C186803775E602781181",
                       "mutable":  false
                   },
                   {
@@ -100,13 +100,13 @@
                   {
                       "path":  "WINDOWS_TOOLS.md",
                       "bytes":  14812,
-                      "sha256":  "9F558F0D53B90FB3202D42B1E565EE8F77738141E3848961034639F6E7CAF692",
+                      "sha256":  "CCA72F4276C4CF0B3E639A49AB30088CF345AC913E1542D06EEABB510308A4C5",
                       "mutable":  false
                   },
                   {
                       "path":  "使用说明.txt",
-                      "bytes":  4180,
-                      "sha256":  "4D4D1D8E822F00B3FB000C5B5BD22520045EBE7B7585E8707CBE761082D2FD2D",
+                      "bytes":  4177,
+                      "sha256":  "69618D09A98DAF2CD224EAB7DCBA031819F14C4E88D933B67C44DB54924E2011",
                       "mutable":  false
                   }
               ]

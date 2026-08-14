@@ -8,10 +8,12 @@
 #import <QuartzCore/QuartzCore.h>
 #import <notify.h>
 #import <objc/runtime.h>
+#import <os/lock.h>
 
 #import "VCAudioSampleConverter.h"
 #import "VCFrameConverter.h"
 #import "VCSharedMediaBus.h"
+#import "VCSharedMediaProtocol.h"
 #import "VCStreamCoordinator.h"
 
 static char VCOutputProxyAssociationKey;
@@ -25,8 +27,22 @@ static char VCPhotoReplacementModeAssociationKey;
 static char VCPhotoFileDataAssociationKey;
 static dispatch_once_t VCPhotoJPEGFallbackLogToken;
 static dispatch_once_t VCPhotoMetadataFailureLogToken;
-static BOOL VCSystemPipelineIsReceivingReplacement(void) {
-    return VCSystemPipelineIsActive(VCSharedMediaKindVideo, 1.5);
+
+static CFStringRef const VCReplacedSampleAttachmentKey =
+    CFSTR(VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY);
+
+static BOOL VCSampleWasReplacedBySystem(CMSampleBufferRef sampleBuffer) {
+    if (!sampleBuffer) return NO;
+    if (CMGetAttachment(sampleBuffer,
+                        VCReplacedSampleAttachmentKey,
+                        NULL) == kCFBooleanTrue) {
+        return YES;
+    }
+    CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+    return pixelBuffer &&
+        CVBufferGetAttachment(pixelBuffer,
+                              VCReplacedSampleAttachmentKey,
+                              NULL) == kCFBooleanTrue;
 }
 
 static CIContext *VCSharedCIContext(void) {
@@ -39,40 +55,78 @@ static CIContext *VCSharedCIContext(void) {
 }
 
 static CMSampleBufferRef VCCopyCurrentReplacement(CMSampleBufferRef original) CF_RETURNS_RETAINED {
-    // mediaserverd already replaced this stream when its heartbeat is current.
-    // Bypassing here prevents a second conversion while still providing an
-    // automatic application-level fallback on unsupported system builds.
-    if (VCSystemPipelineIsReceivingReplacement()) return NULL;
     VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
+    // Suppress only for evidence attached to this exact sample. A global
+    // mediaserverd heartbeat cannot prove that another capture session, node
+    // subclass, or output path was replaced successfully.
+    if (VCSampleWasReplacedBySystem(original)) return NULL;
     BOOL aspectFill = YES;
     NSInteger preferredFPS = 60;
     CVPixelBufferRef source = [coordinator copyLatestPixelBufferWithAspectFill:&aspectFill
                                                                  preferredFPS:&preferredFPS];
-    if (!source) {
-        [coordinator publishCompatibilityOutputPixelBuffer:NULL];
-        return NULL;
-    }
+    if (!source) return NULL;
     CMSampleBufferRef replacement = VCCopyReplacementSampleBuffer(original,
                                                                    source,
                                                                    aspectFill,
                                                                    preferredFPS);
     VCReleaseSharedVideoPixelBuffer(source);
-    // Publish the exact converted application buffer. BGRA conversion is deferred
-    // until a preview layer actually renders, avoiding one extra GPU pass per frame
-    // in recording/processing clients that do not show a preview.
-    [coordinator publishCompatibilityOutputPixelBuffer:
-        replacement ? CMSampleBufferGetImageBuffer(replacement) : NULL];
     return replacement;
 }
 
 #pragma mark - AVCaptureVideoDataOutput compatibility path
 
-@interface VCVideoDataOutputProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+@interface VCVideoDataOutputProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate> {
+    os_unfair_lock _stateLock;
+    CVPixelBufferRef _latestCompatibilityPixelBuffer;
+    CFAbsoluteTime _latestCallbackTime;
+    BOOL _outputPathActive;
+}
 @property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> originalDelegate;
+- (CVPixelBufferRef _Nullable)copyRecentCompatibilityPixelBufferWithActivePath:
+    (BOOL *)activePath CF_RETURNS_RETAINED;
 @end
 
 
 @implementation VCVideoDataOutputProxy
+
+- (instancetype)init {
+    self = [super init];
+    if (self) _stateLock = (os_unfair_lock)OS_UNFAIR_LOCK_INIT;
+    return self;
+}
+
+- (void)recordCompatibilityPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    CVPixelBufferRef retained = pixelBuffer ? CVPixelBufferRetain(pixelBuffer) : NULL;
+    CVPixelBufferRef retired = NULL;
+    os_unfair_lock_lock(&_stateLock);
+    retired = _latestCompatibilityPixelBuffer;
+    _latestCompatibilityPixelBuffer = retained;
+    _latestCallbackTime = CFAbsoluteTimeGetCurrent();
+    _outputPathActive = YES;
+    os_unfair_lock_unlock(&_stateLock);
+    if (retired) CVPixelBufferRelease(retired);
+}
+
+- (CVPixelBufferRef)copyRecentCompatibilityPixelBufferWithActivePath:(BOOL *)activePath {
+    CVPixelBufferRef result = NULL;
+    CVPixelBufferRef stale = NULL;
+    os_unfair_lock_lock(&_stateLock);
+    BOOL recent = _outputPathActive && _latestCallbackTime > 0 &&
+        CFAbsoluteTimeGetCurrent() - _latestCallbackTime <= 2.0;
+    if (!recent && _outputPathActive) {
+        stale = _latestCompatibilityPixelBuffer;
+        _latestCompatibilityPixelBuffer = NULL;
+        _latestCallbackTime = 0;
+        _outputPathActive = NO;
+    }
+    if (activePath) *activePath = recent;
+    if (recent && _latestCompatibilityPixelBuffer) {
+        result = CVPixelBufferRetain(_latestCompatibilityPixelBuffer);
+    }
+    os_unfair_lock_unlock(&_stateLock);
+    if (stale) CVPixelBufferRelease(stale);
+    return result;
+}
 
 - (BOOL)respondsToSelector:(SEL)selector {
     return [super respondsToSelector:selector] || [self.originalDelegate respondsToSelector:selector];
@@ -90,6 +144,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     if (![delegate respondsToSelector:_cmd]) return;
 
     CMSampleBufferRef replacement = VCCopyCurrentReplacement(sampleBuffer);
+    [self recordCompatibilityPixelBuffer:
+        replacement ? CMSampleBufferGetImageBuffer(replacement) : NULL];
     [delegate captureOutput:output
       didOutputSampleBuffer:replacement ?: sampleBuffer
              fromConnection:connection];
@@ -102,6 +158,12 @@ didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
     id<AVCaptureVideoDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
     if ([delegate respondsToSelector:_cmd]) {
         [delegate captureOutput:output didDropSampleBuffer:sampleBuffer fromConnection:connection];
+    }
+}
+
+- (void)dealloc {
+    if (_latestCompatibilityPixelBuffer) {
+        CVPixelBufferRelease(_latestCompatibilityPixelBuffer);
     }
 }
 
@@ -166,10 +228,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
     id<AVCaptureAudioDataOutputSampleBufferDelegate> delegate = self.originalDelegate;
     if (![delegate respondsToSelector:_cmd]) return;
-    CMSampleBufferRef replacement = NULL;
-    if (!VCSystemPipelineIsActive(VCSharedMediaKindAudio, 1.5)) {
-        replacement = VCCopyReplacementAudioSampleBuffer(sampleBuffer);
-    }
+    CMSampleBufferRef replacement = VCSampleWasReplacedBySystem(sampleBuffer)
+        ? NULL : VCCopyReplacementAudioSampleBuffer(sampleBuffer);
     [delegate captureOutput:output
       didOutputSampleBuffer:replacement ?: sampleBuffer
              fromConnection:connection];
@@ -177,6 +237,29 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 }
 
 @end
+
+static CVPixelBufferRef VCCopySessionCompatibilityPixelBuffer(
+    AVCaptureSession *session,
+    BOOL *activePath) CF_RETURNS_RETAINED {
+    BOOL foundActivePath = NO;
+    if (activePath) *activePath = NO;
+    for (AVCaptureOutput *output in session.outputs) {
+        if (![output isKindOfClass:AVCaptureVideoDataOutput.class]) continue;
+        VCVideoDataOutputProxy *proxy =
+            objc_getAssociatedObject(output, &VCOutputProxyAssociationKey);
+        if (![proxy isKindOfClass:VCVideoDataOutputProxy.class]) continue;
+        BOOL proxyActive = NO;
+        CVPixelBufferRef pixelBuffer =
+            [proxy copyRecentCompatibilityPixelBufferWithActivePath:&proxyActive];
+        foundActivePath = foundActivePath || proxyActive;
+        if (pixelBuffer) {
+            if (activePath) *activePath = YES;
+            return pixelBuffer;
+        }
+    }
+    if (activePath) *activePath = foundActivePath;
+    return NULL;
+}
 
 %hook AVCaptureAudioDataOutput
 
@@ -239,19 +322,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     CALayer *overlay = objc_getAssociatedObject(previewLayer, &VCPreviewOverlayAssociationKey);
     if (!overlay) return;
 
-    if (VCSystemPipelineIsReceivingReplacement()) {
-        overlay.hidden = YES;
-        self.displayedSurface = nil;
-        [self replaceSharedPixelBufferLease:NULL];
-        return;
-    }
-
     VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
     BOOL aspectFill = YES;
     NSInteger preferredFPS = 60;
     BOOL outputPathActive = NO;
     CVPixelBufferRef pixelBuffer =
-        [coordinator copyLatestCompatibilityOutputPixelBufferWithActivePath:&outputPathActive];
+        VCCopySessionCompatibilityPixelBuffer(previewLayer.session, &outputPathActive);
     if (outputPathActive && pixelBuffer) {
         CVPixelBufferRef displayBuffer = VCCopyDisplayPixelBuffer(pixelBuffer);
         CVPixelBufferRelease(pixelBuffer);
@@ -429,7 +505,6 @@ static VCPhotoSourceSnapshot *VCPhotoSnapshotLocked(AVCapturePhoto *photo) {
 typedef NS_ENUM(NSInteger, VCPhotoReplacementMode) {
     VCPhotoReplacementModeOriginal = 0,
     VCPhotoReplacementModeApplicationFallback = 1,
-    VCPhotoReplacementModeSystem = 2,
 };
 
 static VCPhotoReplacementMode VCReplacementModeForPhoto(AVCapturePhoto *photo) {
@@ -440,10 +515,12 @@ static VCPhotoReplacementMode VCReplacementModeForPhoto(AVCapturePhoto *photo) {
 
         VCStreamCoordinator *coordinator = [VCStreamCoordinator sharedCoordinator];
         VCPhotoReplacementMode mode = VCPhotoReplacementModeOriginal;
-        if (coordinator.isSystemPipelineReplacementConfigured &&
-            VCSystemPipelineIsReceivingReplacement()) {
-            mode = VCPhotoReplacementModeSystem;
-        } else if (coordinator.isReplacementActive) {
+        // AVCapturePhoto does not expose a stable session identifier that can
+        // be correlated with a mediaserverd BW node. Prefer a conservative
+        // per-photo fallback over suppressing this path because an unrelated
+        // session emitted a global heartbeat. If the system layer already
+        // replaced the photo, this reuses the same source and remains fail-open.
+        if (coordinator.isReplacementActive) {
             mode = VCPhotoSnapshotLocked(photo).pixelBuffer
                 ? VCPhotoReplacementModeApplicationFallback
                 : VCPhotoReplacementModeOriginal;

@@ -246,6 +246,9 @@ def validate_zero_copy_bus() -> None:
             "memory_order_release",
             "VCMarkSystemPipelineActivity",
             "VCSystemPipelineIsActive",
+            "VCNotifyTokenForChannel",
+            "VCShouldPublishPipelineHeartbeat",
+            "VCShouldPublishMediaTimestamp",
             "_cachedSurfaceState",
             "_cachedPixelBuffer",
             "IOSurfaceIncrementUseCount",
@@ -253,6 +256,20 @@ def validate_zero_copy_bus() -> None:
             "VCReleaseSharedVideoPixelBuffer",
         ),
         "shared media bus",
+    )
+    if "notify_cancel" in bus or "notify_post" in bus:
+        fail("shared media bus must keep tokens and poll state without per-frame posts")
+    require(
+        bus,
+        (
+            "IOSurfaceIncrementUseCount(racedSurface)",
+            "IOSurfaceDecrementUseCount(surface)",
+            "previous implicit lease-transfer invariant",
+            "VCNotifyWriteState(VCNotifyChannelVideoTimestamp,",
+            "VCNotifyWriteState(VCNotifyChannelVideoSurface, state)",
+            "surfaceStateDue = !_surfaceStatePublished",
+        ),
+        "shared video lease and notify hot path",
     )
     if "NSData" in bus or "NSKeyedArchiver" in bus:
         fail("shared frame bus must not serialize media payloads")
@@ -357,6 +374,7 @@ def validate_zero_copy_bus() -> None:
 def validate_hooks_and_fail_open() -> None:
     media = read_text("MediaServer.x")
     tweak = read_text("Tweak.x")
+    coordinator = read_text("VCStreamCoordinator.m")
     audio = read_text("VCAudioSampleConverter.m")
     converter = read_text("VCFrameConverter.m")
     all_source = "\n".join(
@@ -382,6 +400,8 @@ def validate_hooks_and_fail_open() -> None:
             "VCDirectInstanceMethod",
             "VCMediaServerRescanScheduled",
             "VCReplacedSampleAttachmentKey",
+            "kCMAttachmentMode_ShouldPropagate",
+            "kCVAttachmentMode_ShouldPropagate",
             "CMSampleBufferGetImageBuffer",
             "CMAudioFormatDescriptionGetStreamBasicDescription",
             "VCIsSupportedReplacementPixelFormat",
@@ -406,7 +426,11 @@ def validate_hooks_and_fail_open() -> None:
         (
             "VCVideoDataOutputProxy",
             "VCAudioDataOutputProxy",
-            "VCSystemPipelineIsActive",
+            "VCSampleWasReplacedBySystem",
+            "Suppress only for evidence attached to this exact sample",
+            "VCCopySessionCompatibilityPixelBuffer",
+            "previewLayer.session",
+            "copyRecentCompatibilityPixelBufferWithActivePath",
             "replacement ?: sampleBuffer",
             "VCPhotoDataPreservesAuthenticMetadata",
             "preserving the authentic original camera file",
@@ -419,6 +443,10 @@ def validate_hooks_and_fail_open() -> None:
         ),
         "application fallback",
     )
+    if "VCSystemPipelineIsActive" in tweak:
+        fail("a global pipeline heartbeat still suppresses an application fallback")
+    if "copyLatestCompatibilityOutputPixelBufferWithActivePath" in coordinator:
+        fail("compatibility preview state is still global instead of output/session scoped")
     springboard_guard = tweak.find('isEqualToString:@"SpringBoard"')
     springboard_return = tweak.find("return;", springboard_guard)
     if springboard_guard < 0 or springboard_return < 0:
@@ -448,6 +476,10 @@ def validate_hooks_and_fail_open() -> None:
             "VCIsSupportedReplacementPixelFormat",
             "VCMaximumOutstandingBuffersPerFormat = 6",
             "VCCopyStablePixelBuffer",
+            "VCFrameStateLock",
+            "VCPixelTransferSessionLock",
+            "A sibling output can finish the same conversion",
+            "Slow pixel transfer",
         ),
         "video format preservation",
     )
@@ -579,6 +611,8 @@ def validate_jpeg_parser_tests() -> None:
         shared_test,
         (
             "testSurfaceStateRoundTrip",
+            "testPipelineHeartbeatRateLimit",
+            "testMediaTimestampRateLimit",
             "testAudioRingWrap",
             "testAudioReadCursor",
             "testResampleInputBounds",

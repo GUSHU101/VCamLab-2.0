@@ -4,12 +4,58 @@
 #import <ImageIO/ImageIO.h>
 #import <IOSurface/IOSurfaceRef.h>
 #import <VideoToolbox/VideoToolbox.h>
+#import <float.h>
+#import <mach/mach_time.h>
 #import <os/lock.h>
+#import <stdatomic.h>
 
-static os_unfair_lock VCTransferLock = OS_UNFAIR_LOCK_INIT;
+// Cache/pool metadata and the VideoToolbox transfer session have different
+// contention profiles. Cache hits must not wait behind a GPU transfer already
+// running for another BW output node.
+static os_unfair_lock VCFrameStateLock = OS_UNFAIR_LOCK_INIT;
+static os_unfair_lock VCPixelTransferSessionLock = OS_UNFAIR_LOCK_INIT;
 static VTPixelTransferSessionRef VCTransferSession = NULL;
 static CVPixelBufferRef VCCachedSourceBuffer = NULL;
 static CIContext *VCOrientationContext = nil;
+
+static double VCMillisecondsBetweenMachTicks(uint64_t start, uint64_t end) {
+    if (end < start) return 0.0;
+    static mach_timebase_info_data_t timebase;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ mach_timebase_info(&timebase); });
+    long double nanos = ((long double)(end - start) * timebase.numer) / timebase.denom;
+    return (double)(nanos / 1000000.0L);
+}
+
+static void VCLogSlowPixelTransfer(uint64_t started,
+                                   uint64_t sessionAcquired,
+                                   uint64_t transferFinished,
+                                   size_t width,
+                                   size_t height,
+                                   OSType pixelFormat) {
+    double totalMilliseconds = VCMillisecondsBetweenMachTicks(started,
+                                                               transferFinished);
+    if (totalMilliseconds < 12.0) return;
+    static _Atomic(uint64_t) lastLogTicks = 0;
+    uint64_t observed = atomic_load_explicit(&lastLogTicks, memory_order_relaxed);
+    double sinceLastLog = observed == 0
+        ? DBL_MAX : VCMillisecondsBetweenMachTicks(observed, transferFinished);
+    if (sinceLastLog < 5000.0 ||
+        !atomic_compare_exchange_strong_explicit(&lastLogTicks,
+                                                  &observed,
+                                                  transferFinished,
+                                                  memory_order_relaxed,
+                                                  memory_order_relaxed)) {
+        return;
+    }
+    NSLog(@"[VirtualCamPro] Slow pixel transfer %zux%zu/%u: wait=%.2fms transfer=%.2fms total=%.2fms",
+          width,
+          height,
+          (unsigned int)pixelFormat,
+          VCMillisecondsBetweenMachTicks(started, sessionAcquired),
+          VCMillisecondsBetweenMachTicks(sessionAcquired, transferFinished),
+          totalMilliseconds);
+}
 
 static CGColorSpaceRef VCSharedDeviceRGBColorSpace(void) {
     static CGColorSpaceRef colorSpace;
@@ -125,6 +171,32 @@ static void VCLockedClearConvertedFrames(void) {
         VCConvertedFrameEntries[index] = (VCConvertedFrameEntry){0};
     }
     VCConvertedFrameEntryCount = 0;
+}
+
+static CVPixelBufferRef VCLockedCopyConvertedFrame(
+    CVPixelBufferRef source,
+    size_t width,
+    size_t height,
+    OSType pixelFormat,
+    BOOL aspectFill,
+    CMFormatDescriptionRef templateDescription,
+    CMVideoFormatDescriptionRef *replacementDescriptionOut) {
+    if (VCCachedSourceBuffer != source) return NULL;
+    for (size_t index = 0; index < VCConvertedFrameEntryCount; index++) {
+        VCConvertedFrameEntry *entry = &VCConvertedFrameEntries[index];
+        if (entry->width == width && entry->height == height &&
+            entry->pixelFormat == pixelFormat && entry->aspectFill == aspectFill &&
+            (entry->templateDescription == templateDescription ||
+             (entry->templateDescription && templateDescription &&
+              CFEqual(entry->templateDescription, templateDescription)))) {
+            if (replacementDescriptionOut && entry->replacementDescription) {
+                *replacementDescriptionOut =
+                    (CMVideoFormatDescriptionRef)CFRetain(entry->replacementDescription);
+            }
+            return CVPixelBufferRetain(entry->buffer);
+        }
+    }
+    return NULL;
 }
 
 static void VCLockedReleasePixelBufferPools(void) {
@@ -252,7 +324,7 @@ CVPixelBufferRef VCCopyPixelBufferApplyingOrientation(CVPixelBufferRef source,
     size_t width = (size_t)extent.size.width;
     size_t height = (size_t)extent.size.height;
     CVPixelBufferRef destination = NULL;
-    os_unfair_lock_lock(&VCTransferLock);
+    os_unfair_lock_lock(&VCFrameStateLock);
     CVPixelBufferPoolRef pool = VCLockedPixelBufferPool(width,
                                                         height,
                                                         kCVPixelFormatType_32BGRA);
@@ -263,7 +335,7 @@ CVPixelBufferRef VCCopyPixelBufferApplyingOrientation(CVPixelBufferRef source,
             VCBoundedPixelBufferAllocationAttributes(),
             &destination)
         : kCVReturnInvalidArgument;
-    os_unfair_lock_unlock(&VCTransferLock);
+    os_unfair_lock_unlock(&VCFrameStateLock);
     if (result != kCVReturnSuccess || !destination) return NULL;
 
     CIContext *context = VCSharedOrientationContext();
@@ -292,7 +364,7 @@ CVPixelBufferRef VCCopyDisplayPixelBuffer(CVPixelBufferRef source) {
     if (!image) return NULL;
 
     CVPixelBufferRef destination = NULL;
-    os_unfair_lock_lock(&VCTransferLock);
+    os_unfair_lock_lock(&VCFrameStateLock);
     CVPixelBufferPoolRef pool = VCLockedPixelBufferPool(width,
                                                         height,
                                                         kCVPixelFormatType_32BGRA);
@@ -303,7 +375,7 @@ CVPixelBufferRef VCCopyDisplayPixelBuffer(CVPixelBufferRef source) {
             VCBoundedPixelBufferAllocationAttributes(),
             &destination)
         : kCVReturnInvalidArgument;
-    os_unfair_lock_unlock(&VCTransferLock);
+    os_unfair_lock_unlock(&VCFrameStateLock);
     if (result != kCVReturnSuccess || !destination) return NULL;
 
     CIContext *context = VCSharedOrientationContext();
@@ -324,7 +396,10 @@ void VCResetFrameConverterCache(void) {
 }
 
 void VCFlushFrameConverterCaches(BOOL releasePoolsAndSession) {
-    os_unfair_lock_lock(&VCTransferLock);
+    // Conversion releases the state lock before waiting for the session lock,
+    // so this ordering cannot deadlock with an in-flight transfer.
+    os_unfair_lock_lock(&VCPixelTransferSessionLock);
+    os_unfair_lock_lock(&VCFrameStateLock);
     VCLockedClearConvertedFrames();
     if (VCCachedSourceBuffer) {
         CVPixelBufferRelease(VCCachedSourceBuffer);
@@ -332,13 +407,14 @@ void VCFlushFrameConverterCaches(BOOL releasePoolsAndSession) {
     }
     if (releasePoolsAndSession) {
         VCLockedReleasePixelBufferPools();
-        if (VCTransferSession) {
-            VTPixelTransferSessionInvalidate(VCTransferSession);
-            CFRelease(VCTransferSession);
-            VCTransferSession = NULL;
-        }
     }
-    os_unfair_lock_unlock(&VCTransferLock);
+    os_unfair_lock_unlock(&VCFrameStateLock);
+    if (releasePoolsAndSession && VCTransferSession) {
+        VTPixelTransferSessionInvalidate(VCTransferSession);
+        CFRelease(VCTransferSession);
+        VCTransferSession = NULL;
+    }
+    os_unfair_lock_unlock(&VCPixelTransferSessionLock);
     if (releasePoolsAndSession && VCOrientationContext) {
         [VCOrientationContext clearCaches];
     }
@@ -382,8 +458,9 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
         return NULL;
     }
 
+    uint64_t conversionStarted = mach_continuous_time();
     CVPixelBufferRef destination = NULL;
-    os_unfair_lock_lock(&VCTransferLock);
+    os_unfair_lock_lock(&VCFrameStateLock);
 
     if (VCCachedSourceBuffer != source) {
         VCLockedClearConvertedFrames();
@@ -391,21 +468,16 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
         VCCachedSourceBuffer = CVPixelBufferRetain(source);
     }
 
-    for (size_t index = 0; index < VCConvertedFrameEntryCount; index++) {
-        VCConvertedFrameEntry *entry = &VCConvertedFrameEntries[index];
-        if (entry->width == width && entry->height == height &&
-            entry->pixelFormat == pixelFormat && entry->aspectFill == aspectFill &&
-            (entry->templateDescription == templateDescription ||
-             (entry->templateDescription && templateDescription &&
-              CFEqual(entry->templateDescription, templateDescription)))) {
-            destination = CVPixelBufferRetain(entry->buffer);
-            if (replacementDescriptionOut && entry->replacementDescription) {
-                *replacementDescriptionOut =
-                    (CMVideoFormatDescriptionRef)CFRetain(entry->replacementDescription);
-            }
-            os_unfair_lock_unlock(&VCTransferLock);
-            return destination;
-        }
+    destination = VCLockedCopyConvertedFrame(source,
+                                              width,
+                                              height,
+                                              pixelFormat,
+                                              aspectFill,
+                                              templateDescription,
+                                              replacementDescriptionOut);
+    if (destination) {
+        os_unfair_lock_unlock(&VCFrameStateLock);
+        return destination;
     }
 
     CVPixelBufferPoolRef pool = VCLockedPixelBufferPool(width, height, pixelFormat);
@@ -415,14 +487,35 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
                                 VCBoundedPixelBufferAllocationAttributes(),
                                 &destination)
                            : kCVReturnInvalidArgument;
+    os_unfair_lock_unlock(&VCFrameStateLock);
     if (result != kCVReturnSuccess || !destination) {
-        os_unfair_lock_unlock(&VCTransferLock);
         return NULL;
     }
 
     // Destination color-space and clean-aperture attachments can influence the
     // transfer. Install the camera template metadata before converting pixels.
     CVBufferPropagateAttachments(templateBuffer, destination);
+    os_unfair_lock_lock(&VCPixelTransferSessionLock);
+    uint64_t sessionAcquired = mach_continuous_time();
+
+    // A sibling output can finish the same conversion while this thread is
+    // allocating. Recheck after acquiring the sole session lane and reuse the
+    // cached result rather than running VideoToolbox twice.
+    os_unfair_lock_lock(&VCFrameStateLock);
+    CVPixelBufferRef raced = VCLockedCopyConvertedFrame(source,
+                                                         width,
+                                                         height,
+                                                         pixelFormat,
+                                                         aspectFill,
+                                                         templateDescription,
+                                                         replacementDescriptionOut);
+    os_unfair_lock_unlock(&VCFrameStateLock);
+    if (raced) {
+        os_unfair_lock_unlock(&VCPixelTransferSessionLock);
+        CVPixelBufferRelease(destination);
+        return raced;
+    }
+
     VTPixelTransferSessionRef session = VCLockedTransferSession();
     OSStatus status = kVTPixelTransferNotSupportedErr;
     if (session) {
@@ -430,8 +523,15 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
         VTSessionSetProperty(session, kVTPixelTransferPropertyKey_ScalingMode, scalingMode);
         status = VTPixelTransferSessionTransferImage(session, source, destination);
     }
+    uint64_t transferFinished = mach_continuous_time();
     if (status != noErr) {
-        os_unfair_lock_unlock(&VCTransferLock);
+        os_unfair_lock_unlock(&VCPixelTransferSessionLock);
+        VCLogSlowPixelTransfer(conversionStarted,
+                               sessionAcquired,
+                               transferFinished,
+                               width,
+                               height,
+                               pixelFormat);
         CVPixelBufferRelease(destination);
         return NULL;
     }
@@ -450,31 +550,48 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
         }
         if (status != noErr || !replacementDescription) {
             if (replacementDescription) CFRelease(replacementDescription);
-            os_unfair_lock_unlock(&VCTransferLock);
+            os_unfair_lock_unlock(&VCPixelTransferSessionLock);
             CVPixelBufferRelease(destination);
             return NULL;
         }
     }
 
-    if (VCConvertedFrameEntryCount >= VCMaximumCachedFormats) {
-        VCLockedClearConvertedFrames();
+    os_unfair_lock_lock(&VCFrameStateLock);
+    BOOL cacheIsCurrent = VCCachedSourceBuffer == source;
+    if (cacheIsCurrent) {
+        if (VCConvertedFrameEntryCount >= VCMaximumCachedFormats) {
+            VCLockedClearConvertedFrames();
+        }
+        VCConvertedFrameEntries[VCConvertedFrameEntryCount++] = (VCConvertedFrameEntry){
+            .width = width,
+            .height = height,
+            .pixelFormat = pixelFormat,
+            .aspectFill = aspectFill,
+            .templateDescription = templateDescription
+                ? (CMFormatDescriptionRef)CFRetain(templateDescription)
+                : NULL,
+            .replacementDescription = replacementDescription,
+            .buffer = CVPixelBufferRetain(destination),
+        };
+        replacementDescription = NULL;
     }
-    VCConvertedFrameEntries[VCConvertedFrameEntryCount++] = (VCConvertedFrameEntry){
-        .width = width,
-        .height = height,
-        .pixelFormat = pixelFormat,
-        .aspectFill = aspectFill,
-        .templateDescription = templateDescription
-            ? (CMFormatDescriptionRef)CFRetain(templateDescription)
-            : NULL,
-        .replacementDescription = replacementDescription,
-        .buffer = CVPixelBufferRetain(destination),
-    };
-    if (replacementDescriptionOut && replacementDescription) {
+
+    CMVideoFormatDescriptionRef returnedDescription = cacheIsCurrent
+        ? VCConvertedFrameEntries[VCConvertedFrameEntryCount - 1].replacementDescription
+        : replacementDescription;
+    if (replacementDescriptionOut && returnedDescription) {
         *replacementDescriptionOut =
-            (CMVideoFormatDescriptionRef)CFRetain(replacementDescription);
+            (CMVideoFormatDescriptionRef)CFRetain(returnedDescription);
     }
-    os_unfair_lock_unlock(&VCTransferLock);
+    os_unfair_lock_unlock(&VCFrameStateLock);
+    if (replacementDescription) CFRelease(replacementDescription);
+    os_unfair_lock_unlock(&VCPixelTransferSessionLock);
+    VCLogSlowPixelTransfer(conversionStarted,
+                           sessionAcquired,
+                           transferFinished,
+                           width,
+                           height,
+                           pixelFormat);
 
     return destination;
 }
