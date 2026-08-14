@@ -35,9 +35,9 @@ ls -la /var/jb/Library/PreferenceLoader/Preferences/VirtualCamPro.plist
 
 ## 点击 VirtualCamPro 后设置闪退
 
-先确认安装的是 2.18.0 或更高版本。该版本不再在页面加载阶段安装自定义 table header，也不为设置面板单独链接 QuartzCore；动态状态只在导航转场结束后使用 iOS 15 兼容的一参数 selector 刷新。可选刷新异常会自动停表，原生开关和来源配置仍应可用。
+先确认安装的是 2.19.0 或更高版本。该版本不再在页面加载阶段安装自定义 table header，也不为设置面板单独链接 QuartzCore；动态状态只在导航转场结束后使用 iOS 15 兼容的一参数 selector 刷新。可选刷新异常会自动停表，原生开关和来源配置仍应可用。
 
-如果 2.18.0 仍闪退，先从 `/var/mobile/Library/Logs/CrashReporter/` 导出最新的 `Preferences-*.ips` 或 `Preferences-*.crash`，不要只提供“闪退”截图：
+如果 2.19.0 仍闪退，先从 `/var/mobile/Library/Logs/CrashReporter/` 导出最新的 `Preferences-*.ips` 或 `Preferences-*.crash`，不要只提供“闪退”截图：
 
 ```bash
 ls -lt /var/mobile/Library/Logs/CrashReporter/Preferences* | head

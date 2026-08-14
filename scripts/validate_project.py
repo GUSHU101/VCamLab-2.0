@@ -91,6 +91,7 @@ def validate_preferences() -> None:
     header = read_text("VCPreferences.h")
     controller = read_text("prefs/VCPRootListController.m")
     bundle_makefile = read_text("prefs/Makefile")
+    workflow = read_text(".github/workflows/test.yml")
     root = read_plist("prefs/Resources/Root.plist")
     items = root.get("items", [])
     keyed = {item.get("key"): item for item in items if item.get("key")}
@@ -198,8 +199,6 @@ def validate_preferences() -> None:
             "reloadCurrentSource:",
             "sourceRestartToken",
             "pipeline.video.heartbeat.v1",
-            "VCPDashboardHeaderView",
-            "systemLayoutSizeFittingSize",
             "scheduledTimerWithTimeInterval:1.0",
             "stopStatusRefreshTimer",
             "vcLiveStatus",
@@ -220,13 +219,20 @@ def validate_preferences() -> None:
             "performSafeRuntimePresentationRefresh",
             "disableRuntimePresentationAfterException:",
             "_runtimePresentationDisabled",
-            "_dashboardLayoutInProgress",
-            "tableView.tableHeaderView = nil",
             "VCPRepairStoredPreferences",
             "VCPReadFinitePreferenceNumber",
-            "VCPNumberIsIntegral",
+            "VCPReadIntegerPreference",
+            "VCPReadRealPreference",
+            "VCPReadBooleanPreference",
+            "VCPreferenceValidateInteger",
+            "VCPreferenceValidateReal",
+            "[value length] > 64",
+            "OS_UNFAIR_LOCK_INIT",
+            "lastAttemptMilliseconds",
+            '@"maximumLength": @4096',
+            '@"maximumLength": @128',
         ),
-        "mobile source dashboard and runtime recovery",
+        "mobile native settings and runtime recovery",
     )
     view_will_appear = controller.split("- (void)viewWillAppear:", 1)[1].split(
         "- (void)viewDidAppear:", 1
@@ -237,8 +243,16 @@ def validate_preferences() -> None:
     if "reloadSpecifier:specifier animated:" in controller or \
        "reloadSpecifier:statusSpecifier animated:" in controller:
         fail("Settings live rows must use the iOS 15-compatible reload selector")
-    if "[self installDashboardHeaderIfNeeded]" in controller:
-        fail("iOS 15 Settings must use native PreferenceLoader rows at launch")
+    for legacy_dashboard_symbol in (
+        "VCPDashboardHeaderView",
+        "dashboardHeader",
+        "installDashboardHeaderIfNeeded",
+        "layoutDashboardHeaderIfNeeded",
+        "systemLayoutSizeFittingSize",
+    ):
+        if legacy_dashboard_symbol in controller:
+            fail("legacy Settings dashboard code must not be compiled: " +
+                 legacy_dashboard_symbol)
     if "QuartzCore" in bundle_makefile:
         fail("preference bundle must not require the optional QuartzCore dashboard")
     specifier_loader = controller.split("- (NSArray *)specifiers", 1)[1].split(
@@ -250,6 +264,33 @@ def validate_preferences() -> None:
         fail("stored preference types must be normalized before Root.plist loads")
     if "notify_cancel(" in controller or controller.count("notify_register_check(") != 1:
         fail("settings live polling must reuse process-lifetime Darwin notify tokens")
+    preference_validation = read_text("VCPreferenceValidation.h")
+    preference_validation_test = read_text("tests/test_preference_validation.c")
+    require(
+        preference_validation,
+        (
+            "VCPreferenceValidateInteger",
+            "VCPreferenceValidateReal",
+            "isfinite",
+            "value < (double)minimum",
+            "value > (double)maximum",
+        ),
+        "stored preference numeric validation",
+    )
+    require(
+        preference_validation_test,
+        (
+            "1.0e300",
+            "-1.0e300",
+            "NAN",
+            "INFINITY",
+            "test_integer_boundaries",
+            "test_real_boundaries",
+        ),
+        "stored preference sanitizer regression test",
+    )
+    if "tests/test_preference_validation.c" not in workflow:
+        fail("source validation workflow does not run preference sanitizer tests")
     require(
         bundle_makefile,
         ("AVFoundation", "PhotosUI"),
@@ -263,6 +304,13 @@ def validate_preferences() -> None:
     require(
         implementation,
         (
+            '#import "VCPreferenceValidation.h"',
+            "VCReadFinitePreferenceNumber",
+            "VCReadBooleanPreference",
+            "VCPreferenceValidateInteger",
+            "VCPreferenceValidateReal",
+            "[value length] > 64",
+            "[value length] > 16",
             'hasPrefix:@"/var/mobile/Media/"',
             'hasPrefix:@"/var/mobile/Library/VirtualCamPro/"',
             "path.stringByStandardizingPath",
@@ -271,6 +319,15 @@ def validate_preferences() -> None:
         ),
         "preference validation",
     )
+    for unsafe_scalar_read in (
+        "[enabledValue boolValue]",
+        "[fpsValue integerValue]",
+        "[qualityValue doubleValue]",
+        "[staleFrameTimeoutValue doubleValue]",
+    ):
+        if unsafe_scalar_read in implementation:
+            fail("runtime preferences contain an unchecked scalar message: " +
+                 unsafe_scalar_read)
     example = read_plist("example-config.plist")
     for key in expected:
         if key not in example:
@@ -338,6 +395,10 @@ def validate_zero_copy_bus() -> None:
             "VCNotifyCheckChanged",
             "_cachedSurfaceState",
             "_cachedPixelBuffer",
+            "static _Atomic(int) tokens[VCNotifyChannelCount]",
+            "A transient notifyd failure is retried at a bounded cadence",
+            "atomic_load_explicit(&tokens[channel], memory_order_acquire)",
+            "lastAttemptMilliseconds[VCNotifyChannelCount]",
             "IOSurfaceIncrementUseCount",
             "IOSurfaceDecrementUseCount",
             "VCReleaseSharedVideoPixelBuffer",

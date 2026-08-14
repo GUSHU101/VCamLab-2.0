@@ -7,8 +7,10 @@
 #import <mach/mach_time.h>
 #import <math.h>
 #import <notify.h>
+#import <os/lock.h>
 
 #import "../VCJPEGParser.h"
+#import "../VCPreferenceValidation.h"
 
 static CFStringRef const VCPreferencesChangedNotification = CFSTR("com.murkaska.virtualcampro/preferences.changed");
 static CFStringRef const VCPreferencesDomain = CFSTR("com.murkaska.virtualcampro");
@@ -49,151 +51,6 @@ typedef NS_ENUM(uint64_t, VCPStreamStatus) {
     VCPStreamStatusHoldingLastFrame = 4,
     VCPStreamStatusCompleted = 5,
 };
-
-@interface VCPDashboardHeaderView : UIView
-@property (nonatomic, strong) UIView *cardView;
-@property (nonatomic, strong) UILabel *titleLabel;
-@property (nonatomic, strong) UILabel *versionLabel;
-@property (nonatomic, strong) UILabel *statusLabel;
-@property (nonatomic, strong) UILabel *sourceLabel;
-@property (nonatomic, strong) UILabel *pipelineLabel;
-- (void)updateEnabled:(BOOL)enabled
-               status:(VCPStreamStatus)status
-               source:(NSString *)source
-             pipeline:(NSString *)pipeline
-              version:(NSString *)version;
-@end
-
-@implementation VCPDashboardHeaderView
-
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (!self) return nil;
-    self.backgroundColor = UIColor.clearColor;
-
-    _cardView = [UIView new];
-    _cardView.translatesAutoresizingMaskIntoConstraints = NO;
-    _cardView.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
-    _cardView.accessibilityIdentifier = @"VirtualCamProStatusCard";
-    [self addSubview:_cardView];
-
-    _titleLabel = [UILabel new];
-    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
-    _titleLabel.adjustsFontForContentSizeCategory = YES;
-    _titleLabel.text = @"VirtualCamPro";
-    [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
-                                                 forAxis:UILayoutConstraintAxisHorizontal];
-
-    _versionLabel = [UILabel new];
-    _versionLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _versionLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
-    _versionLabel.adjustsFontForContentSizeCategory = YES;
-    _versionLabel.textColor = UIColor.secondaryLabelColor;
-    _versionLabel.textAlignment = NSTextAlignmentRight;
-    [_versionLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
-                                                   forAxis:UILayoutConstraintAxisHorizontal];
-
-    _statusLabel = [UILabel new];
-    _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-    _statusLabel.adjustsFontForContentSizeCategory = YES;
-    _statusLabel.numberOfLines = 2;
-
-    _sourceLabel = [UILabel new];
-    _sourceLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _sourceLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
-    _sourceLabel.adjustsFontForContentSizeCategory = YES;
-    _sourceLabel.textColor = UIColor.secondaryLabelColor;
-    _sourceLabel.numberOfLines = 2;
-
-    _pipelineLabel = [UILabel new];
-    _pipelineLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    _pipelineLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
-    _pipelineLabel.adjustsFontForContentSizeCategory = YES;
-    _pipelineLabel.textColor = UIColor.tertiaryLabelColor;
-    _pipelineLabel.numberOfLines = 2;
-
-    [_cardView addSubview:_titleLabel];
-    [_cardView addSubview:_versionLabel];
-    [_cardView addSubview:_statusLabel];
-    [_cardView addSubview:_sourceLabel];
-    [_cardView addSubview:_pipelineLabel];
-    [NSLayoutConstraint activateConstraints:@[
-        [_cardView.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
-        [_cardView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16.0],
-        [_cardView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16.0],
-        [_cardView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-8.0],
-        [_titleLabel.topAnchor constraintEqualToAnchor:_cardView.topAnchor constant:15.0],
-        [_titleLabel.leadingAnchor constraintEqualToAnchor:_cardView.leadingAnchor constant:16.0],
-        [_versionLabel.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
-        [_versionLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:_titleLabel.trailingAnchor
-                                                                 constant:8.0],
-        [_versionLabel.trailingAnchor constraintEqualToAnchor:_cardView.trailingAnchor constant:-16.0],
-        [_statusLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:11.0],
-        [_statusLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
-        [_statusLabel.trailingAnchor constraintEqualToAnchor:_versionLabel.trailingAnchor],
-        [_sourceLabel.topAnchor constraintEqualToAnchor:_statusLabel.bottomAnchor constant:6.0],
-        [_sourceLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
-        [_sourceLabel.trailingAnchor constraintEqualToAnchor:_versionLabel.trailingAnchor],
-        [_pipelineLabel.topAnchor constraintEqualToAnchor:_sourceLabel.bottomAnchor constant:5.0],
-        [_pipelineLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
-        [_pipelineLabel.trailingAnchor constraintEqualToAnchor:_versionLabel.trailingAnchor],
-        [_pipelineLabel.bottomAnchor constraintEqualToAnchor:_cardView.bottomAnchor constant:-15.0],
-    ]];
-    return self;
-}
-
-- (void)updateEnabled:(BOOL)enabled
-               status:(VCPStreamStatus)status
-               source:(NSString *)source
-             pipeline:(NSString *)pipeline
-              version:(NSString *)version {
-    NSString *statusText = @"已停用 · 真实相机与麦克风保持原样";
-    UIColor *statusColor = UIColor.secondaryLabelColor;
-    BOOL sourceNeedsAttention = [source containsString:@"尚未"] ||
-                                [source containsString:@"无效"] ||
-                                [source containsString:@"不存在"];
-    if (enabled && sourceNeedsAttention) {
-        statusText = @"● 请先完成当前来源配置";
-        statusColor = UIColor.systemRedColor;
-    } else if (enabled) {
-        switch (status) {
-            case VCPStreamStatusConnecting:
-                statusText = @"● 正在初始化来源";
-                statusColor = UIColor.systemOrangeColor;
-                break;
-            case VCPStreamStatusReceiving:
-                statusText = @"● 替换来源正在工作";
-                statusColor = UIColor.systemGreenColor;
-                break;
-            case VCPStreamStatusError:
-                statusText = @"● 来源异常，正在自动恢复";
-                statusColor = UIColor.systemRedColor;
-                break;
-            case VCPStreamStatusHoldingLastFrame:
-                statusText = @"● 断流保护：保持最后一帧";
-                statusColor = UIColor.systemOrangeColor;
-                break;
-            case VCPStreamStatusCompleted:
-                statusText = @"● 本地媒体播放完成";
-                statusColor = UIColor.systemBlueColor;
-                break;
-            default:
-                statusText = @"● 等待 SpringBoard 接管";
-                statusColor = UIColor.systemOrangeColor;
-                break;
-        }
-    }
-    self.statusLabel.text = statusText;
-    self.statusLabel.textColor = statusColor;
-    self.sourceLabel.text = [@"来源：" stringByAppendingString:source ?: @"未配置"];
-    self.pipelineLabel.text = [@"系统管线：" stringByAppendingString:pipeline ?: @"状态不可用"];
-    self.versionLabel.text = version.length > 0
-        ? [@"v" stringByAppendingString:version] : @"";
-}
-
-@end
 
 typedef NS_ENUM(NSInteger, VCLocalMediaImportError) {
     VCLocalMediaImportErrorInvalidSource = 1,
@@ -396,17 +253,32 @@ static uint64_t VCPMonotonicMilliseconds(void) {
 static int VCPNotifyTokenForChannel(VCPNotifyChannel channel) {
     static dispatch_once_t onceToken;
     static int tokens[VCPNotifyChannelCount];
+    static uint64_t lastAttemptMilliseconds[VCPNotifyChannelCount];
+    static os_unfair_lock tokenLock = OS_UNFAIR_LOCK_INIT;
     dispatch_once(&onceToken, ^{
         for (NSUInteger index = 0; index < VCPNotifyChannelCount; index++) {
             tokens[index] = -1;
-            int token = -1;
-            if (notify_register_check(VCPNotifyChannelNames[index], &token) ==
-                NOTIFY_STATUS_OK) {
-                tokens[index] = token;
-            }
         }
     });
-    return channel < VCPNotifyChannelCount ? tokens[channel] : -1;
+    if (channel >= VCPNotifyChannelCount) return -1;
+
+    os_unfair_lock_lock(&tokenLock);
+    int token = tokens[channel];
+    uint64_t now = VCPMonotonicMilliseconds();
+    uint64_t lastAttempt = lastAttemptMilliseconds[channel];
+    BOOL retryDue = lastAttempt == 0 || now < lastAttempt ||
+                    now - lastAttempt >= 5000;
+    if (token < 0 && retryDue) {
+        lastAttemptMilliseconds[channel] = now;
+        int candidate = -1;
+        if (notify_register_check(VCPNotifyChannelNames[channel], &candidate) ==
+            NOTIFY_STATUS_OK) {
+            tokens[channel] = candidate;
+            token = candidate;
+        }
+    }
+    os_unfair_lock_unlock(&tokenLock);
+    return token;
 }
 
 static BOOL VCPGetNotifyChannelState(VCPNotifyChannel channel,
@@ -421,14 +293,44 @@ static BOOL VCPReadFinitePreferenceNumber(id value, double *numberOut) {
         ![value isKindOfClass:NSString.class]) {
         return NO;
     }
+    if ([value isKindOfClass:NSString.class] && [value length] > 64) return NO;
     double number = [value doubleValue];
     if (!isfinite(number)) return NO;
     if (numberOut) *numberOut = number;
     return YES;
 }
 
-static BOOL VCPNumberIsIntegral(double number) {
-    return isfinite(number) && fabs(number - round(number)) < 0.000001;
+static NSInteger VCPReadIntegerPreference(id value,
+                                          NSInteger minimum,
+                                          NSInteger maximum,
+                                          NSInteger defaultValue) {
+    double number = 0;
+    int64_t integer = 0;
+    return VCPReadFinitePreferenceNumber(value, &number) &&
+           VCPreferenceValidateInteger(number, minimum, maximum, &integer)
+        ? (NSInteger)integer : defaultValue;
+}
+
+static double VCPReadRealPreference(id value,
+                                    double minimum,
+                                    double maximum,
+                                    double defaultValue) {
+    double number = 0;
+    double normalized = 0;
+    return VCPReadFinitePreferenceNumber(value, &number) &&
+           VCPreferenceValidateReal(number, minimum, maximum, &normalized)
+        ? normalized : defaultValue;
+}
+
+static BOOL VCPReadBooleanPreference(id value, BOOL defaultValue) {
+    if (![value isKindOfClass:NSNumber.class] &&
+        ![value isKindOfClass:NSString.class]) {
+        return defaultValue;
+    }
+    if ([value isKindOfClass:NSString.class] && [value length] > 16) {
+        return defaultValue;
+    }
+    return [value boolValue];
 }
 
 static BOOL VCPSetPreferenceValueIfDifferent(CFStringRef key, id value) {
@@ -444,12 +346,15 @@ static BOOL VCPRepairStoredPreferences(void) {
     __block BOOL changed = NO;
     NSArray<NSDictionary *> *integerRules = @[
         @{ @"key": @"sourceType", @"default": @0,
+           @"minimum": @0, @"maximum": @2,
            @"allowed": @[@0, @1, @2] },
         @{ @"key": @"preferredFPS", @"default": @60,
            @"minimum": @1, @"maximum": @240 },
         @{ @"key": @"sourceRotation", @"default": @0,
+           @"minimum": @0, @"maximum": @270,
            @"allowed": @[@0, @90, @180, @270] },
         @{ @"key": @"maximumPixelDimension", @"default": @1920,
+           @"minimum": @1280, @"maximum": @3840,
            @"allowed": @[@1280, @1920, @2560, @3840] },
     ];
     for (NSDictionary *rule in integerRules) {
@@ -457,15 +362,16 @@ static BOOL VCPRepairStoredPreferences(void) {
         id value = CFBridgingRelease(CFPreferencesCopyAppValue(
             (__bridge CFStringRef)key, VCPreferencesDomain));
         double number = 0;
+        int64_t integer64 = 0;
         BOOL valid = VCPReadFinitePreferenceNumber(value, &number) &&
-                     VCPNumberIsIntegral(number);
-        NSInteger integer = valid ? (NSInteger)llround(number) : 0;
+                     VCPreferenceValidateInteger(
+                         number,
+                         [rule[@"minimum"] longLongValue],
+                         [rule[@"maximum"] longLongValue],
+                         &integer64);
+        NSInteger integer = valid ? (NSInteger)integer64 : 0;
         NSArray<NSNumber *> *allowed = rule[@"allowed"];
         if (valid && allowed) valid = [allowed containsObject:@(integer)];
-        NSNumber *minimum = rule[@"minimum"];
-        NSNumber *maximum = rule[@"maximum"];
-        if (valid && minimum) valid = integer >= minimum.integerValue;
-        if (valid && maximum) valid = integer <= maximum.integerValue;
         NSNumber *normalized = valid ? @(integer) : rule[@"default"];
         changed |= VCPSetPreferenceValueIfDifferent(
             (__bridge CFStringRef)key, normalized);
@@ -482,10 +388,14 @@ static BOOL VCPRepairStoredPreferences(void) {
         id value = CFBridgingRelease(CFPreferencesCopyAppValue(
             (__bridge CFStringRef)key, VCPreferencesDomain));
         double number = 0;
+        double normalizedNumber = 0;
         BOOL valid = VCPReadFinitePreferenceNumber(value, &number) &&
-                     number >= [rule[@"minimum"] doubleValue] &&
-                     number <= [rule[@"maximum"] doubleValue];
-        NSNumber *normalized = valid ? @(number) : rule[@"default"];
+                     VCPreferenceValidateReal(
+                         number,
+                         [rule[@"minimum"] doubleValue],
+                         [rule[@"maximum"] doubleValue],
+                         &normalizedNumber);
+        NSNumber *normalized = valid ? @(normalizedNumber) : rule[@"default"];
         changed |= VCPSetPreferenceValueIfDifferent(
             (__bridge CFStringRef)key, normalized);
     }
@@ -504,7 +414,8 @@ static BOOL VCPRepairStoredPreferences(void) {
         NSNumber *normalized = nil;
         if ([value isKindOfClass:NSNumber.class] ||
             [value isKindOfClass:NSString.class]) {
-            normalized = @([value boolValue]);
+            normalized = @(VCPReadBooleanPreference(value,
+                                                     defaultValue.boolValue));
         } else {
             normalized = defaultValue;
         }
@@ -512,17 +423,19 @@ static BOOL VCPRepairStoredPreferences(void) {
             (__bridge CFStringRef)key, normalized);
     }];
 
-    NSDictionary<NSString *, NSString *> *stringDefaults = @{
-        @"streamURL": @"",
-        @"localMediaPath": @"",
-        @"sourceRestartToken": @"",
+    NSDictionary<NSString *, NSDictionary *> *stringRules = @{
+        @"streamURL": @{ @"default": @"", @"maximumLength": @4096 },
+        @"localMediaPath": @{ @"default": @"", @"maximumLength": @4096 },
+        @"sourceRestartToken": @{ @"default": @"", @"maximumLength": @128 },
     };
-    [stringDefaults enumerateKeysAndObjectsUsingBlock:^(
-        NSString *key, NSString *defaultValue, __unused BOOL *stop) {
+    [stringRules enumerateKeysAndObjectsUsingBlock:^(
+        NSString *key, NSDictionary *rule, __unused BOOL *stop) {
         id value = CFBridgingRelease(CFPreferencesCopyAppValue(
             (__bridge CFStringRef)key, VCPreferencesDomain));
-        NSString *normalized = [value isKindOfClass:NSString.class]
-            ? value : defaultValue;
+        NSUInteger maximumLength = [rule[@"maximumLength"] unsignedIntegerValue];
+        NSString *normalized = [value isKindOfClass:NSString.class] &&
+                               [value length] <= maximumLength
+            ? value : rule[@"default"];
         changed |= VCPSetPreferenceValueIfDifferent(
             (__bridge CFStringRef)key, normalized);
     }];
@@ -537,7 +450,6 @@ static BOOL VCPRepairStoredPreferences(void) {
     NSUInteger _streamTestJPEGOffset;
     uint64_t _lastPreferencesSyncMilliseconds;
     BOOL _runtimePresentationDisabled;
-    BOOL _dashboardLayoutInProgress;
 }
 @property (nonatomic, strong) NSURLSession *streamTestSession;
 @property (nonatomic, strong) NSURLSessionDataTask *streamTestTask;
@@ -546,7 +458,6 @@ static BOOL VCPRepairStoredPreferences(void) {
 @property (nonatomic, strong) UIAlertController *streamTestAlert;
 @property (nonatomic, assign) BOOL localMediaImportInProgress;
 @property (nonatomic, strong) UIAlertController *localMediaImportAlert;
-@property (nonatomic, strong) VCPDashboardHeaderView *dashboardHeader;
 @property (nonatomic, strong) NSTimer *statusRefreshTimer;
 - (void)finishStreamTestWithTitle:(NSString *)title message:(NSString *)message;
 - (void)showStreamTestResultWithTitle:(NSString *)title message:(NSString *)message;
@@ -558,9 +469,7 @@ static BOOL VCPRepairStoredPreferences(void) {
 - (void)showLocalMediaImportProgressWithMessage:(NSString *)message
                                       completion:(dispatch_block_t)completion;
 - (void)showLocalMediaResultWithTitle:(NSString *)title message:(NSString *)message;
-- (void)installDashboardHeaderIfNeeded;
 - (void)refreshRuntimePresentation;
-- (void)layoutDashboardHeaderIfNeeded;
 - (void)startStatusRefreshTimer;
 - (void)stopStatusRefreshTimer;
 - (void)performSafeRuntimePresentationRefresh;
@@ -613,42 +522,6 @@ static BOOL VCPRepairStoredPreferences(void) {
     [self stopStatusRefreshTimer];
 }
 
-- (void)installDashboardHeaderIfNeeded {
-    UITableView *tableView = [self table];
-    if (!tableView) return;
-    if (!self.dashboardHeader) {
-        self.dashboardHeader = [[VCPDashboardHeaderView alloc]
-            initWithFrame:CGRectMake(0, 0, CGRectGetWidth(tableView.bounds), 150.0)];
-    }
-    if (tableView.tableHeaderView != self.dashboardHeader) {
-        tableView.tableHeaderView = self.dashboardHeader;
-    }
-    [self layoutDashboardHeaderIfNeeded];
-}
-
-- (void)layoutDashboardHeaderIfNeeded {
-    if (_dashboardLayoutInProgress || _runtimePresentationDisabled) return;
-    UITableView *tableView = [self table];
-    VCPDashboardHeaderView *header = self.dashboardHeader;
-    CGFloat width = CGRectGetWidth(tableView.bounds);
-    if (!tableView || !header || width <= 0) return;
-    _dashboardLayoutInProgress = YES;
-    @try {
-        header.frame = CGRectMake(0, 0, width, MAX(1.0, CGRectGetHeight(header.frame)));
-        CGSize fittingSize = [header systemLayoutSizeFittingSize:CGSizeMake(width, 1.0)
-                                  withHorizontalFittingPriority:UILayoutPriorityRequired
-                                        verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
-        CGFloat height = MAX(142.0, ceil(fittingSize.height));
-        if (fabs(CGRectGetHeight(header.frame) - height) > 0.5 ||
-            fabs(CGRectGetWidth(header.frame) - width) > 0.5) {
-            header.frame = CGRectMake(0, 0, width, height);
-            tableView.tableHeaderView = header;
-        }
-    } @finally {
-        _dashboardLayoutInProgress = NO;
-    }
-}
-
 - (void)startStatusRefreshTimer {
     if (_runtimePresentationDisabled || self.statusRefreshTimer || !self.view.window) return;
     __weak VCPRootListController *weakSelf = self;
@@ -679,16 +552,11 @@ static BOOL VCPRepairStoredPreferences(void) {
     if (_runtimePresentationDisabled) return;
     _runtimePresentationDisabled = YES;
     [self stopStatusRefreshTimer];
-    NSLog(@"[VirtualCamPro] Optional Settings dashboard disabled after %@: %@",
+    NSLog(@"[VirtualCamPro] Optional Settings live refresh disabled after %@: %@",
           exception.name ?: @"exception", exception.reason ?: @"unknown reason");
-    // Keep the native PreferenceLoader rows usable. The dashboard is optional,
-    // so any layout/runtime incompatibility degrades to the static list.
+    // Keep the native PreferenceLoader rows usable. Live status is optional,
+    // so any private-framework mismatch degrades to the static list.
     @try {
-        UITableView *tableView = [self table];
-        if (tableView.tableHeaderView == self.dashboardHeader) {
-            tableView.tableHeaderView = nil;
-        }
-        self.dashboardHeader = nil;
         self.navigationItem.rightBarButtonItem = nil;
     } @catch (__unused NSException *cleanupException) {
     }
@@ -731,8 +599,7 @@ static BOOL VCPRepairStoredPreferences(void) {
         [self synchronizePreferencesIfNeeded:YES];
         id sourceValue = CFBridgingRelease(
             CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
-        NSInteger sourceTypeValue = [sourceValue integerValue];
-        if (sourceTypeValue < 0 || sourceTypeValue > 2) sourceTypeValue = 0;
+        NSInteger sourceTypeValue = VCPReadIntegerPreference(sourceValue, 0, 2, 0);
         NSNumber *sourceType = @(sourceTypeValue);
         NSArray *allSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
         NSMutableArray *visible = [NSMutableArray arrayWithCapacity:allSpecifiers.count];
@@ -751,12 +618,18 @@ static BOOL VCPRepairStoredPreferences(void) {
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     NSString *key = [specifier propertyForKey:@"key"];
     if ([key isEqualToString:@"preferredFPS"]) {
-        NSInteger roundedFPS = (NSInteger)llround([value doubleValue]);
-        value = @(MAX(1, MIN(240, roundedFPS)));
+        double number = 0;
+        int64_t integer = 60;
+        if (!VCPReadFinitePreferenceNumber(value, &number) ||
+            !VCPreferenceValidateInteger(number, 1, 240, &integer)) {
+            integer = 60;
+        }
+        value = @(integer);
     }
     if ([key isEqualToString:@"streamURL"] && [value isKindOfClass:NSString.class]) {
         value = [value stringByTrimmingCharactersInSet:
             NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([value length] > 4096) value = @"";
     }
     [super setPreferenceValue:value specifier:specifier];
     [self synchronizePreferencesIfNeeded:YES];
@@ -852,7 +725,8 @@ static BOOL VCPRepairStoredPreferences(void) {
     [self synchronizePreferencesIfNeeded:NO];
     id value = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("streamURL"), VCPreferencesDomain));
-    if (![value isKindOfClass:NSString.class] || [value length] == 0) {
+    if (![value isKindOfClass:NSString.class] || [value length] == 0 ||
+        [value length] > 4096) {
         return @"尚未配置 URL";
     }
     NSURL *url = [NSURL URLWithString:[value stringByTrimmingCharactersInSet:
@@ -860,7 +734,7 @@ static BOOL VCPRepairStoredPreferences(void) {
     NSString *scheme = url.scheme.lowercaseString;
     if ((!([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"])) ||
         url.host.length == 0 || url.user.length > 0 || url.password.length > 0 ||
-        url.fragment.length > 0 || url.absoluteString.length > 4096) {
+        url.fragment.length > 0) {
         return @"URL 格式无效";
     }
     BOOL hls = [url.absoluteString.lowercaseString containsString:@".m3u8"];
@@ -873,7 +747,7 @@ static BOOL VCPRepairStoredPreferences(void) {
     [self synchronizePreferencesIfNeeded:NO];
     id sourceValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
-    switch ([sourceValue integerValue]) {
+    switch (VCPReadIntegerPreference(sourceValue, 0, 2, 0)) {
         case 1:
             return @"设备屏幕实时镜像 · 系统方向";
         case 2: {
@@ -1008,7 +882,7 @@ static BOOL VCPRepairStoredPreferences(void) {
     [self synchronizePreferencesIfNeeded:NO];
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
-    if (![enabledValue boolValue]) return @"已停用";
+    if (!VCPReadBooleanPreference(enabledValue, NO)) return @"已停用";
     uint64_t status = VCPStreamStatusDisabled;
     if (!VCPGetSystemStreamStatus(&status)) return @"SpringBoard 状态不可用";
     switch (status) {
@@ -1025,7 +899,7 @@ static BOOL VCPRepairStoredPreferences(void) {
     [self synchronizePreferencesIfNeeded:NO];
     id enabledValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
-    if (![enabledValue boolValue]) return @"已停用";
+    if (!VCPReadBooleanPreference(enabledValue, NO)) return @"已停用";
     uint64_t timestamp = 0;
     if (!VCPGetNotifyChannelState(VCPNotifyChannelVideoPipeline, &timestamp) ||
         timestamp == 0) {
@@ -1063,7 +937,7 @@ static BOOL VCPRepairStoredPreferences(void) {
         CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
     NSString *title = @"网络流使用顺序";
     NSString *message = @"1. 在 Windows 控制中心启动 OBS 桥接。\n2. 填写手机可访问的 HTTP/HTTPS URL。\n3. 点击“检测当前网络流”。\n4. 启用替换并重新打开相机应用。\n\n网络方向、帧率和质量全部由 OBS/发送端决定；手机保留原生麦克风。";
-    switch ([sourceValue integerValue]) {
+    switch (VCPReadIntegerPreference(sourceValue, 0, 2, 0)) {
         case 1:
             title = @"屏幕镜像使用顺序";
             message = @"1. 选择设备屏幕实时镜像。\n2. 启用系统摄像头替换。\n3. 打开目标相机应用。\n\n屏幕方向和刷新节奏自动跟随设备；本地视频的旋转、镜像、FPS 和质量设置不会作用于屏幕来源。";
@@ -1134,6 +1008,13 @@ static BOOL VCPRepairStoredPreferences(void) {
         CFPreferencesCopyAppValue(CFSTR("mirrorSource"), VCPreferencesDomain));
     id dimensionValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("maximumPixelDimension"), VCPreferencesDomain));
+    BOOL enabled = VCPReadBooleanPreference(enabledValue, NO);
+    BOOL mirror = VCPReadBooleanPreference(mirrorValue, NO);
+    BOOL hold = VCPReadBooleanPreference(holdValue, YES);
+    NSInteger fps = VCPReadIntegerPreference(fpsValue, 1, 240, 60);
+    NSInteger rotation = VCPReadIntegerPreference(rotationValue, 0, 270, 0);
+    NSInteger dimension = VCPReadIntegerPreference(dimensionValue, 1280, 3840, 1920);
+    double staleTimeout = VCPReadRealPreference(staleValue, 2.0, 30.0, 8.0);
     NSISO8601DateFormatter *dateFormatter = [NSISO8601DateFormatter new];
     NSString *report = [NSString stringWithFormat:
         @"VirtualCamPro %@ runtime diagnostics\n"
@@ -1154,7 +1035,7 @@ static BOOL VCPRepairStoredPreferences(void) {
         [dateFormatter stringFromDate:NSDate.date],
         UIDevice.currentDevice.model,
         UIDevice.currentDevice.systemVersion,
-        [enabledValue boolValue] ? @"yes" : @"no",
+        enabled ? @"yes" : @"no",
         [self currentSourceConfigurationSummary:nil],
         [self currentSourceRuntimeStatus:nil],
         [self currentSystemVideoPipelineStatus:nil],
@@ -1163,12 +1044,12 @@ static BOOL VCPRepairStoredPreferences(void) {
         [self currentLocalMediaLibrarySummary:nil],
         [self currentLocalTransformStatus:nil],
         [self currentLocalVolumeHookStatus:nil],
-        fpsValue ?: @60,
-        rotationValue ?: @0,
-        [mirrorValue boolValue] ? @"yes" : @"no",
-        dimensionValue ?: @1920,
-        holdValue ? ([holdValue boolValue] ? @"yes" : @"no") : @"yes",
-        staleValue ?: @8];
+        @(fps),
+        @(rotation),
+        mirror ? @"yes" : @"no",
+        @(dimension),
+        hold ? @"yes" : @"no",
+        @(staleTimeout)];
     UIPasteboard.generalPasteboard.string = report;
     [self showLocalMediaResultWithTitle:@"诊断信息已复制"
                                 message:@"已复制运行状态和安全化来源摘要；网络 URL 的查询参数和访问令牌不会写入诊断文本。"];
@@ -1460,12 +1341,13 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
         CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
     NSString *streamValue = CFBridgingRelease(
         CFPreferencesCopyAppValue(CFSTR("streamURL"), VCPreferencesDomain));
-    NSString *trimmedValue = [streamValue isKindOfClass:[NSString class]]
+    NSString *trimmedValue = [streamValue isKindOfClass:[NSString class]] &&
+                             [streamValue length] <= 4096
         ? [streamValue stringByTrimmingCharactersInSet:
             [NSCharacterSet whitespaceAndNewlineCharacterSet]]
         : @"";
     NSURL *streamURL = [NSURL URLWithString:trimmedValue];
-    if (sourceTypeValue && [sourceTypeValue integerValue] != 0) {
+    if (VCPReadIntegerPreference(sourceTypeValue, 0, 2, 0) != 0) {
         [self showStreamTestResultWithTitle:@"当前不是网络来源"
                                    message:@"请将“替换来源”切换为网络 HLS / MJPEG 后再检测 URL。屏幕和本地媒体由 SpringBoard 本地读取，不建立网络连接。"];
         return;
@@ -1480,7 +1362,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
         return;
     }
 
-    if ([enabledValue boolValue]) {
+    if (VCPReadBooleanPreference(enabledValue, NO)) {
         uint64_t status = VCPStreamStatusDisabled;
         VCPGetSystemStreamStatus(&status);
         switch (status) {

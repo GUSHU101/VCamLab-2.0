@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.19.0 - 2026-08-14
+
+- Removed the entire retired Auto Layout dashboard implementation from the PreferenceLoader binary, including its table-header mutation and layout state, so iOS 15 Settings now compiles only the native specifier list and optional read-only row refresh.
+- Added type-gated runtime preference readers in both the Settings bundle and injected media processes. Arrays, dictionaries, oversized numeric strings, NaN/infinity, fractional integers and extreme values now resolve to safe defaults without receiving incompatible Objective-C selectors or reaching `llround` before range validation.
+- Bounded network URL, local path and restart-token lengths before parsing or display, and normalized pasted stream URLs before they are persisted.
+- Made shared-media Darwin notify registration recover from transient `notifyd` failures. Successful tokens remain lock-free on the per-frame hot path while failed registrations retry at a five-second ceiling instead of disabling discovery for the process lifetime.
+- Added portable preference-boundary regression tests under ASan/UBSan and repository invariants that reject reintroduced custom Settings dashboard code, unchecked scalar reads, unbounded preference strings and one-shot shared-bus token registration.
+
 ## 2.18.0 - 2026-08-14
 
 - Changed the iOS 15 Settings entry to launch with native PreferenceLoader rows only; the custom Auto Layout table header is no longer installed during controller loading, and the preference bundle no longer links QuartzCore solely for dashboard decoration.

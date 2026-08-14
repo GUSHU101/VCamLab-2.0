@@ -16,7 +16,9 @@
 - `/var/jb/Library/MobileSubstrate/DynamicLibraries/` 中存在两套 dylib 和 filter plist。
 - 设置中可见 VirtualCamPro，所有开关、URL 与滑块均可保存。
 - 从设置根页连续进入/退出 VirtualCamPro 100 次，原生 PreferenceLoader 列表必须每次正常显示，不能闪退、白屏或卡住导航转场；停用、初始化、稳定产帧、断流保持、本地媒体播放完成、来源错误和来源未配置应由原生状态行正确显示。右上角刷新按钮应立即更新，但页面滚动位置不能跳回顶部。
-- 在调试包中令一次可选状态行重载抛出 Objective-C exception：日志应出现 `Optional Settings dashboard disabled`，定时器应停止，Settings 进程和开关/来源/文件选择等静态行必须继续可用。
+- 在调试包中令一次可选状态行重载抛出 Objective-C exception：日志应出现 `Optional Settings live refresh disabled`，定时器应停止，Settings 进程和开关/来源/文件选择等静态行必须继续可用。
+- 用 `plutil` 分别把 `enabled/sourceType/preferredFPS/jpegQuality/staleFrameTimeout` 写成数组、字典、`NaN`、超长数字字符串与 `1e300`，随后重启 SpringBoard/mediaserverd 并进入设置页：两个系统进程和 Settings 都不得崩溃，设置页应把值恢复成布尔、枚举、60 FPS、1.0 与 8 秒的安全类型。
+- 在调试环境让首次 `notify_register_check` 返回失败：共享视频/音频状态应在约五秒后自动注册成功，期间相机路径保持 fail-open；恢复后成功 token 的每帧路径不得获取重试锁或重复注册。
 - 在网络 URL 文本框持续编辑 30 秒并拖动本地 FPS/JPEG 滑块：每秒状态刷新只能更新带 `vcLiveStatus` 的只读行，键盘、光标、输入内容和滑块手势不得被打断；退出该设置页后不得继续产生一秒定时刷新。
 - 保持设置页可见 30 分钟并用 Instruments/System Trace 观察：四个状态通道只在页面进程首次读取时注册，后续每秒刷新不得反复出现 `notify_register_check`/`notify_cancel`；同一刷新周期不得为每个状态行重复执行偏好域同步。
 - 依次选择网络、屏幕和本地来源，确认页面只展示对应配置组且“当前配置/操作指引”同步变化。无 URL、本地文件未选择或已被外部删除时，原生“当前配置”行必须明确提示先修复配置。

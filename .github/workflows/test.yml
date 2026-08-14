@@ -52,6 +52,13 @@ jobs:
             tests/test_local_orientation_math.c -lm -o /tmp/test_local_orientation_math
           ASAN_OPTIONS=detect_leaks=1 /tmp/test_local_orientation_math
 
+      - name: Test stored preference validation with sanitizers
+        run: |
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -pedantic \
+            -fno-omit-frame-pointer -fsanitize=address,undefined \
+            tests/test_preference_validation.c -lm -o /tmp/test_preference_validation
+          ASAN_OPTIONS=detect_leaks=1 /tmp/test_preference_validation
+
   windows-control-center:
     runs-on: windows-2022
     timeout-minutes: 25

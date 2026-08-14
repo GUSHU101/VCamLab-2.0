@@ -50,18 +50,39 @@ static uint64_t VCMonotonicMilliseconds(void) {
 
 static int VCNotifyTokenForChannel(VCNotifyChannel channel) {
     static dispatch_once_t onceToken;
-    static int tokens[VCNotifyChannelCount];
+    static _Atomic(int) tokens[VCNotifyChannelCount];
+    static uint64_t lastAttemptMilliseconds[VCNotifyChannelCount];
+    static os_unfair_lock tokenLock = OS_UNFAIR_LOCK_INIT;
     dispatch_once(&onceToken, ^{
         for (NSUInteger index = 0; index < VCNotifyChannelCount; index++) {
-            tokens[index] = -1;
-            int token = -1;
-            if (notify_register_check(VCNotifyChannelNames[index], &token) ==
-                NOTIFY_STATUS_OK) {
-                tokens[index] = token;
-            }
+            atomic_init(&tokens[index], -1);
         }
     });
-    return channel < VCNotifyChannelCount ? tokens[channel] : -1;
+    if (channel >= VCNotifyChannelCount) return -1;
+
+    // Successful registrations stay lock-free on every media-frame hot path.
+    // A transient notifyd failure is retried at a bounded cadence instead of
+    // disabling shared video/audio discovery for the lifetime of the process.
+    int token = atomic_load_explicit(&tokens[channel], memory_order_acquire);
+    if (token >= 0) return token;
+
+    os_unfair_lock_lock(&tokenLock);
+    token = atomic_load_explicit(&tokens[channel], memory_order_relaxed);
+    uint64_t now = VCMonotonicMilliseconds();
+    uint64_t lastAttempt = lastAttemptMilliseconds[channel];
+    BOOL retryDue = lastAttempt == 0 || now < lastAttempt ||
+                    now - lastAttempt >= 5000;
+    if (token < 0 && retryDue) {
+        lastAttemptMilliseconds[channel] = now;
+        int candidate = -1;
+        if (notify_register_check(VCNotifyChannelNames[channel], &candidate) ==
+            NOTIFY_STATUS_OK) {
+            atomic_store_explicit(&tokens[channel], candidate, memory_order_release);
+            token = candidate;
+        }
+    }
+    os_unfair_lock_unlock(&tokenLock);
+    return token;
 }
 
 static BOOL VCNotifyWriteState(VCNotifyChannel channel,

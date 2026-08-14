@@ -1,4 +1,5 @@
 #import "VCPreferences.h"
+#import "VCPreferenceValidation.h"
 #import <float.h>
 #import <math.h>
 
@@ -56,6 +57,29 @@ static id VCReadPreference(NSString *key) {
     return CFBridgingRelease(value);
 }
 
+static BOOL VCReadFinitePreferenceNumber(id value, double *numberOut) {
+    if (![value isKindOfClass:NSNumber.class] &&
+        ![value isKindOfClass:NSString.class]) {
+        return NO;
+    }
+    if ([value isKindOfClass:NSString.class] && [value length] > 64) return NO;
+    double number = [value doubleValue];
+    if (!isfinite(number)) return NO;
+    if (numberOut) *numberOut = number;
+    return YES;
+}
+
+static BOOL VCReadBooleanPreference(id value, BOOL defaultValue) {
+    if (![value isKindOfClass:NSNumber.class] &&
+        ![value isKindOfClass:NSString.class]) {
+        return defaultValue;
+    }
+    if ([value isKindOfClass:NSString.class] && [value length] > 16) {
+        return defaultValue;
+    }
+    return [value boolValue];
+}
+
 - (BOOL)reload {
     CFPreferencesAppSynchronize((__bridge CFStringRef)VCPreferencesDomain);
 
@@ -81,37 +105,55 @@ static id VCReadPreference(NSString *key) {
         streamValue = streamValue ?: legacy[VCStreamURLKey];
     }
 
-    BOOL enabled = enabledValue ? [enabledValue boolValue] : NO;
-    NSInteger preferredFPS = fpsValue ? [fpsValue integerValue] : 60;
-    preferredFPS = MAX(1, MIN(240, preferredFPS));
+    BOOL enabled = VCReadBooleanPreference(enabledValue, NO);
+    double number = 0;
+    int64_t integer = 0;
+    NSInteger preferredFPS =
+        VCReadFinitePreferenceNumber(fpsValue, &number) &&
+        VCPreferenceValidateInteger(number, 1, 240, &integer)
+            ? (NSInteger)integer : 60;
 
-    NSInteger sourceRotation = sourceRotationValue ? [sourceRotationValue integerValue] : 0;
+    NSInteger sourceRotation =
+        VCReadFinitePreferenceNumber(sourceRotationValue, &number) &&
+        VCPreferenceValidateInteger(number, 0, 270, &integer)
+            ? (NSInteger)integer : 0;
     if (sourceRotation != 90 && sourceRotation != 180 && sourceRotation != 270) {
         sourceRotation = 0;
     }
-    BOOL mirrorSource = mirrorSourceValue ? [mirrorSourceValue boolValue] : NO;
+    BOOL mirrorSource = VCReadBooleanPreference(mirrorSourceValue, NO);
 
-    NSInteger maximumPixelDimension = maximumPixelDimensionValue
-        ? [maximumPixelDimensionValue integerValue]
-        : 1920;
+    NSInteger maximumPixelDimension =
+        VCReadFinitePreferenceNumber(maximumPixelDimensionValue, &number) &&
+        VCPreferenceValidateInteger(number, 1280, 3840, &integer)
+            ? (NSInteger)integer : 1920;
     if (maximumPixelDimension != 1280 && maximumPixelDimension != 1920 &&
         maximumPixelDimension != 2560 && maximumPixelDimension != 3840) {
         maximumPixelDimension = 1920;
     }
 
-    CGFloat jpegQuality = qualityValue ? [qualityValue doubleValue] : 1.0;
-    jpegQuality = MAX(0.50, MIN(1.0, jpegQuality));
+    double real = 0;
+    CGFloat jpegQuality =
+        VCReadFinitePreferenceNumber(qualityValue, &number) &&
+        VCPreferenceValidateReal(number, 0.50, 1.0, &real)
+            ? (CGFloat)real : 1.0;
 
-    BOOL aspectFill = aspectFillValue ? [aspectFillValue boolValue] : YES;
-    NSInteger sourceTypeValueInteger = sourceTypeValue ? [sourceTypeValue integerValue]
-                                                       : VCSourceTypeNetwork;
+    BOOL aspectFill = VCReadBooleanPreference(aspectFillValue, YES);
+    NSInteger sourceTypeValueInteger =
+        VCReadFinitePreferenceNumber(sourceTypeValue, &number) &&
+        VCPreferenceValidateInteger(number,
+                                    VCSourceTypeNetwork,
+                                    VCSourceTypeLocalMedia,
+                                    &integer)
+            ? (NSInteger)integer : VCSourceTypeNetwork;
     VCSourceType sourceType = (sourceTypeValueInteger >= VCSourceTypeNetwork &&
                                sourceTypeValueInteger <= VCSourceTypeLocalMedia)
         ? (VCSourceType)sourceTypeValueInteger : VCSourceTypeNetwork;
-    BOOL loopLocalMedia = loopLocalMediaValue ? [loopLocalMediaValue boolValue] : YES;
-    BOOL holdLastFrame = holdLastFrameValue ? [holdLastFrameValue boolValue] : YES;
-    NSTimeInterval staleFrameTimeout = staleFrameTimeoutValue ? [staleFrameTimeoutValue doubleValue] : 8.0;
-    staleFrameTimeout = MAX(2.0, MIN(30.0, staleFrameTimeout));
+    BOOL loopLocalMedia = VCReadBooleanPreference(loopLocalMediaValue, YES);
+    BOOL holdLastFrame = VCReadBooleanPreference(holdLastFrameValue, YES);
+    NSTimeInterval staleFrameTimeout =
+        VCReadFinitePreferenceNumber(staleFrameTimeoutValue, &number) &&
+        VCPreferenceValidateReal(number, 2.0, 30.0, &real)
+            ? real : 8.0;
     NSString *sourceRestartToken = @"";
     if ([sourceRestartTokenValue isKindOfClass:NSString.class] &&
         [sourceRestartTokenValue length] <= 128) {
@@ -119,26 +161,27 @@ static id VCReadPreference(NSString *key) {
     }
 
     NSURL *streamURL = nil;
-    if ([streamValue isKindOfClass:[NSString class]] && [streamValue length] > 0) {
+    if ([streamValue isKindOfClass:[NSString class]] &&
+        [streamValue length] > 0 && [streamValue length] <= 4096) {
         NSURL *candidate = [NSURL URLWithString:[streamValue stringByTrimmingCharactersInSet:
                                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]]];
         NSString *scheme = candidate.scheme.lowercaseString;
         if (([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) &&
             candidate.host.length > 0 && candidate.user.length == 0 &&
-            candidate.password.length == 0 && candidate.fragment.length == 0 &&
-            candidate.absoluteString.length <= 4096) {
+            candidate.password.length == 0 && candidate.fragment.length == 0) {
             streamURL = candidate;
         }
     }
 
     NSURL *localMediaURL = nil;
-    if ([localMediaPathValue isKindOfClass:[NSString class]]) {
+    if ([localMediaPathValue isKindOfClass:[NSString class]] &&
+        [localMediaPathValue length] <= 4096) {
         NSString *path = [localMediaPathValue
             stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         NSString *standardized = path.stringByStandardizingPath;
         BOOL approvedRoot = [standardized hasPrefix:@"/var/mobile/Media/"] ||
                             [standardized hasPrefix:@"/var/mobile/Library/VirtualCamPro/"];
-        if (path.length > 0 && path.length <= 4096 && path.isAbsolutePath &&
+        if (path.length > 0 && path.isAbsolutePath &&
             approvedRoot && ![path.pathComponents containsObject:@".."] &&
             ![standardized hasSuffix:@"/"]) {
             localMediaURL = [NSURL fileURLWithPath:standardized isDirectory:NO];
