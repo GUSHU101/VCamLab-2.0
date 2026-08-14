@@ -3,11 +3,14 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
 
 #define VC_SHARED_VIDEO_RING_SIZE 3u
+#define VC_SHARED_VIDEO_CONTROL_MAGIC 0x56435643u
+#define VC_SHARED_VIDEO_CONTROL_VERSION 1u
 #define VC_SHARED_AUDIO_MAGIC 0x56434155u
-#define VC_SHARED_AUDIO_VERSION 1u
+#define VC_SHARED_AUDIO_VERSION 2u
 #define VC_SHARED_AUDIO_SAMPLE_RATE 48000u
 #define VC_SHARED_AUDIO_CHANNELS 2u
 #define VC_SHARED_AUDIO_CAPACITY_FRAMES (VC_SHARED_AUDIO_SAMPLE_RATE * 3u)
@@ -15,7 +18,13 @@
 #define VC_SYSTEM_REPLACEMENT_ATTACHMENT_KEY \
     "com.murkaska.virtualcampro.system-replacement.v1"
 #define VC_PIPELINE_HEARTBEAT_MIN_INTERVAL_MS 250u
-#define VC_MEDIA_TIMESTAMP_MIN_INTERVAL_MS 100u
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    _Atomic(uint64_t) surfaceState;
+    _Atomic(uint64_t) timestampMilliseconds;
+} VCSharedVideoControl;
 
 static inline uint64_t VCPackSurfaceState(uint32_t generation, uint32_t surfaceID) {
     return ((uint64_t)generation << 32) | (uint64_t)surfaceID;
@@ -40,12 +49,12 @@ static inline int VCShouldPublishPipelineHeartbeat(uint64_t nowMilliseconds,
         VC_PIPELINE_HEARTBEAT_MIN_INTERVAL_MS;
 }
 
-static inline int VCShouldPublishMediaTimestamp(uint64_t nowMilliseconds,
-                                                uint64_t lastMilliseconds) {
-    if (nowMilliseconds == 0) return 0;
-    if (lastMilliseconds == 0 || nowMilliseconds < lastMilliseconds) return 1;
-    return nowMilliseconds - lastMilliseconds >=
-        VC_MEDIA_TIMESTAMP_MIN_INTERVAL_MS;
+static inline int VCSharedTimestampIsRecent(uint64_t nowMilliseconds,
+                                           uint64_t timestampMilliseconds,
+                                           uint64_t maximumAgeMilliseconds) {
+    if (nowMilliseconds == 0 || timestampMilliseconds == 0 ||
+        nowMilliseconds < timestampMilliseconds) return 0;
+    return nowMilliseconds - timestampMilliseconds <= maximumAgeMilliseconds;
 }
 
 static inline size_t VCAudioRingFrameIndex(uint64_t absoluteFrame,

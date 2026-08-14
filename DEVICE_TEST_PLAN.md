@@ -88,6 +88,8 @@
 - 切换流 URL 后不得再次出现上一个 URL 的画面。
 - 连续预览 15 分钟并同时运行高内存应用；出现 `Released conversion caches` 后下一网络帧应自动恢复，`mediaserverd` 不得进入崩溃循环。
 - 同时打开多个视频输出节点连续运行 60 分钟，记录 `mediaserverd` 与目标应用的 footprint/IOSurface 数量；预热后应围绕固定池上下波动，不能随 cache race 次数单调增长。结束所有 CaptureSession 后再次采样，确认 wrapper lease 已回收。
+- 记录 60 秒内 `media.video.control.v2`/`media.audio.surface.v2` 的 Darwin 通知活动：稳定视频不应逐帧发布事件，音频也不应按 PCM chunk 重写通知 state；停止并重启 SpringBoard 来源后消费者必须通过生命周期事件重新映射控制块。
+- 以 1080p60 同时驱动预览、录像和 VideoDataOutput，制造短时 PixelTransfer lane 争用：允许重复上一完整替换帧，但任何输出节点都不得穿透真实物理画面；`mediaserverd` 转换缓存增量必须受 64 MiB 上限约束。
 - 在 1080p60 下短时制造 Wi-Fi 抖动或 JPEG 解码压力；接收线程不得被 ImageIO 解码阻塞，恢复后必须在短队列范围内追上最新帧，不能继续播放秒级旧 FIFO。
 - 收集 `Slow pixel transfer` 日志中的 `wait/transfer/total`：1080p60 的持续 `total` 不应反复超过 16.67 ms；如果 `wait` 明显高于 `transfer`，优先检查多节点争用，如果 `transfer` 本身超预算，则记录具体尺寸/像素格式并降低真机验收目标，不能仅凭源码支持项宣称 4K/120/240 FPS 已达标。
 

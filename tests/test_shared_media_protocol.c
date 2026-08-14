@@ -17,12 +17,20 @@ static void testPipelineHeartbeatRateLimit(void) {
     assert(VCShouldPublishPipelineHeartbeat(999, 1000));
 }
 
-static void testMediaTimestampRateLimit(void) {
-    assert(!VCShouldPublishMediaTimestamp(0, 0));
-    assert(VCShouldPublishMediaTimestamp(2000, 0));
-    assert(!VCShouldPublishMediaTimestamp(2099, 2000));
-    assert(VCShouldPublishMediaTimestamp(2100, 2000));
-    assert(VCShouldPublishMediaTimestamp(1999, 2000));
+static void testSharedTimestampFreshness(void) {
+    assert(VCSharedTimestampIsRecent(5000, 4900, 100));
+    assert(!VCSharedTimestampIsRecent(5001, 4900, 100));
+    assert(!VCSharedTimestampIsRecent(4900, 5000, 100));
+    assert(!VCSharedTimestampIsRecent(5000, 0, 100));
+    assert(!VCSharedTimestampIsRecent(0, 0, 100));
+}
+
+static void testVideoControlAtomicLayout(void) {
+    assert(sizeof(VCSharedVideoControl) >= 24);
+    assert(offsetof(VCSharedVideoControl, surfaceState) %
+        _Alignof(_Atomic(uint64_t)) == 0);
+    assert(offsetof(VCSharedVideoControl, timestampMilliseconds) %
+        _Alignof(_Atomic(uint64_t)) == 0);
 }
 
 static void testAudioRingWrap(void) {
@@ -63,7 +71,8 @@ static void testResampleInputBounds(void) {
 int main(void) {
     testSurfaceStateRoundTrip();
     testPipelineHeartbeatRateLimit();
-    testMediaTimestampRateLimit();
+    testSharedTimestampFreshness();
+    testVideoControlAtomicLayout();
     testAudioRingWrap();
     testAudioReadCursor();
     testResampleInputBounds();

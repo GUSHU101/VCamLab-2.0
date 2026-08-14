@@ -248,7 +248,10 @@ def validate_zero_copy_bus() -> None:
             "VCSystemPipelineIsActive",
             "VCNotifyTokenForChannel",
             "VCShouldPublishPipelineHeartbeat",
-            "VCShouldPublishMediaTimestamp",
+            "VCSharedVideoControl",
+            "VC_SHARED_VIDEO_CONTROL_MAGIC",
+            "VCSharedTimestampIsRecent",
+            "VCNotifyCheckChanged",
             "_cachedSurfaceState",
             "_cachedPixelBuffer",
             "IOSurfaceIncrementUseCount",
@@ -257,16 +260,22 @@ def validate_zero_copy_bus() -> None:
         ),
         "shared media bus",
     )
-    if "notify_cancel" in bus or "notify_post" in bus:
-        fail("shared media bus must keep tokens and poll state without per-frame posts")
+    if "notify_cancel" in bus or bus.count("notify_post(") != 1:
+        fail("shared media bus must retain tokens and post only control lifecycle events")
+    if "VCNotifyChannelVideoTimestamp" in bus or \
+       "VCNotifyChannelAudioTimestamp" in bus or \
+       "VCShouldPublishMediaTimestamp" in protocol:
+        fail("media freshness must live in shared memory instead of Darwin notify state")
     require(
         bus,
         (
             "IOSurfaceIncrementUseCount(racedSurface)",
             "IOSurfaceDecrementUseCount(surface)",
             "previous implicit lease-transfer invariant",
-            "VCNotifyWriteState(VCNotifyChannelVideoTimestamp,",
-            "VCNotifyWriteState(VCNotifyChannelVideoSurface, state)",
+            "atomic_store_explicit(&_control->surfaceState",
+            "atomic_load_explicit(&_control->surfaceState",
+            "atomic_store_explicit(&_ring->timestampMilliseconds",
+            "VCNotifyChannelVideoControl",
             "surfaceStateDue = !_surfaceStatePublished",
         ),
         "shared video lease and notify hot path",
@@ -418,6 +427,9 @@ def validate_hooks_and_fail_open() -> None:
             "VCChangeVolumeByDeltaHookInstalled",
             "VCPublishVolumeHookStatus",
             "local-volume-hook.status",
+            "VCNodeOutputDispatchCache",
+            "VCCachedOriginalEmitForClass",
+            "VCCacheOriginalEmitForClass",
         ),
         "system hook fail-open path",
     )
@@ -479,6 +491,10 @@ def validate_hooks_and_fail_open() -> None:
             "VCFrameStateLock",
             "VCPixelTransferSessionLock",
             "A sibling output can finish the same conversion",
+            "os_unfair_lock_trylock",
+            "VCLockedCopyMostRecentConvertedFrame",
+            "VCLockedStoreConvertedFrame",
+            "VCMaximumConvertedFrameCacheBytes = 64 * 1024 * 1024",
             "Slow pixel transfer",
         ),
         "video format preservation",
@@ -612,7 +628,8 @@ def validate_jpeg_parser_tests() -> None:
         (
             "testSurfaceStateRoundTrip",
             "testPipelineHeartbeatRateLimit",
-            "testMediaTimestampRateLimit",
+            "testSharedTimestampFreshness",
+            "testVideoControlAtomicLayout",
             "testAudioRingWrap",
             "testAudioReadCursor",
             "testResampleInputBounds",

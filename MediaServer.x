@@ -6,6 +6,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <stdatomic.h>
+#import <stdint.h>
 #import <substrate.h>
 #import <float.h>
 #import <math.h>
@@ -24,9 +25,16 @@ typedef struct {
     VCEmitSampleBufferFunction original;
 } VCNodeOutputHook;
 
+typedef struct {
+    _Atomic(Class) runtimeClass;
+    _Atomic(VCEmitSampleBufferFunction) original;
+} VCNodeOutputDispatchEntry;
+
 static const NSUInteger VCMaximumNodeOutputHooks = 64;
 static VCNodeOutputHook VCNodeOutputHooks[64];
 static _Atomic(uint32_t) VCNodeOutputHookCount = 0;
+static const NSUInteger VCNodeOutputDispatchCacheSize = 128;
+static VCNodeOutputDispatchEntry VCNodeOutputDispatchCache[128];
 static BOOL VCMediaServerHookInstalled = NO;
 static BOOL VCMediaServerRetryScheduled = NO;
 static _Atomic(uint32_t) VCMediaServerRescanScheduled = 0;
@@ -214,12 +222,73 @@ static BOOL VCNodeOutputIsAudio(id object) {
     return ((BOOL (*)(id, SEL))objc_msgSend)(object, VCMediaTypeIsAudioSelector);
 }
 
+static NSUInteger VCNodeOutputDispatchIndex(Class runtimeClass) {
+    return (((uintptr_t)runtimeClass) >> 4) &
+        (VCNodeOutputDispatchCacheSize - 1);
+}
+
+static VCEmitSampleBufferFunction VCCachedOriginalEmitForClass(Class runtimeClass) {
+    if (!runtimeClass) return NULL;
+    NSUInteger start = VCNodeOutputDispatchIndex(runtimeClass);
+    for (NSUInteger probe = 0; probe < VCNodeOutputDispatchCacheSize; probe++) {
+        NSUInteger index = (start + probe) & (VCNodeOutputDispatchCacheSize - 1);
+        Class cachedClass = atomic_load_explicit(
+            &VCNodeOutputDispatchCache[index].runtimeClass,
+            memory_order_acquire);
+        if (cachedClass == runtimeClass) {
+            return atomic_load_explicit(&VCNodeOutputDispatchCache[index].original,
+                                        memory_order_acquire);
+        }
+        if (!cachedClass) return NULL;
+    }
+    return NULL;
+}
+
+static void VCCacheOriginalEmitForClass(Class runtimeClass,
+                                        VCEmitSampleBufferFunction original) {
+    if (!runtimeClass || !original) return;
+    NSUInteger start = VCNodeOutputDispatchIndex(runtimeClass);
+    for (NSUInteger probe = 0; probe < VCNodeOutputDispatchCacheSize; probe++) {
+        NSUInteger index = (start + probe) & (VCNodeOutputDispatchCacheSize - 1);
+        Class cachedClass = atomic_load_explicit(
+            &VCNodeOutputDispatchCache[index].runtimeClass,
+            memory_order_acquire);
+        if (cachedClass == runtimeClass) {
+            atomic_store_explicit(&VCNodeOutputDispatchCache[index].original,
+                                  original,
+                                  memory_order_release);
+            return;
+        }
+        if (!cachedClass) {
+            Class empty = Nil;
+            if (atomic_compare_exchange_strong_explicit(
+                    &VCNodeOutputDispatchCache[index].runtimeClass,
+                    &empty,
+                    runtimeClass,
+                    memory_order_acq_rel,
+                    memory_order_acquire)) {
+                atomic_store_explicit(&VCNodeOutputDispatchCache[index].original,
+                                      original,
+                                      memory_order_release);
+                return;
+            }
+        }
+    }
+}
+
 static VCEmitSampleBufferFunction VCOriginalEmitForObject(id object) {
+    Class runtimeClass = object_getClass(object);
+    VCEmitSampleBufferFunction cached =
+        VCCachedOriginalEmitForClass(runtimeClass);
+    if (cached) return cached;
     uint32_t count = atomic_load_explicit(&VCNodeOutputHookCount, memory_order_acquire);
-    for (Class current = object_getClass(object); current; current = class_getSuperclass(current)) {
+    for (Class current = runtimeClass; current; current = class_getSuperclass(current)) {
         for (uint32_t index = 0; index < count; index++) {
             if (VCNodeOutputHooks[index].nodeClass == current) {
-                return VCNodeOutputHooks[index].original;
+                VCEmitSampleBufferFunction original =
+                    VCNodeOutputHooks[index].original;
+                VCCacheOriginalEmitForClass(runtimeClass, original);
+                return original;
             }
         }
     }
@@ -374,6 +443,7 @@ static BOOL VCHookNodeOutputClass(Class candidate, SEL emitSelector) {
                     emitSelector,
                     (IMP)VCMediaServerEmitSampleBuffer,
                     (IMP *)&VCNodeOutputHooks[slot].original);
+    VCCacheOriginalEmitForClass(candidate, VCNodeOutputHooks[slot].original);
     return VCNodeOutputHooks[slot].original != NULL;
 }
 

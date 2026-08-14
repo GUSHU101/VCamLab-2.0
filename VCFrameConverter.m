@@ -8,6 +8,7 @@
 #import <mach/mach_time.h>
 #import <os/lock.h>
 #import <stdatomic.h>
+#import <stdint.h>
 
 // Cache/pool metadata and the VideoToolbox transfer session have different
 // contention profiles. Cache hits must not wait behind a GPU transfer already
@@ -15,7 +16,6 @@
 static os_unfair_lock VCFrameStateLock = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock VCPixelTransferSessionLock = OS_UNFAIR_LOCK_INIT;
 static VTPixelTransferSessionRef VCTransferSession = NULL;
-static CVPixelBufferRef VCCachedSourceBuffer = NULL;
 static CIContext *VCOrientationContext = nil;
 
 static double VCMillisecondsBetweenMachTicks(uint64_t start, uint64_t end) {
@@ -69,9 +69,11 @@ static CGColorSpaceRef VCSharedDeviceRGBColorSpace(void) {
 enum {
     VCMaximumCachedFormats = 12,
     VCMaximumOutstandingBuffersPerFormat = 6,
+    VCMaximumConvertedFrameCacheBytes = 64 * 1024 * 1024,
 };
 
 typedef struct {
+    CVPixelBufferRef sourceBuffer;
     size_t width;
     size_t height;
     OSType pixelFormat;
@@ -87,6 +89,8 @@ typedef struct {
     CMFormatDescriptionRef templateDescription;
     CMVideoFormatDescriptionRef replacementDescription;
     CVPixelBufferRef buffer;
+    size_t byteCost;
+    uint64_t lastUse;
 } VCConvertedFrameEntry;
 
 static VCPixelBufferPoolEntry VCPixelBufferPoolEntries[VCMaximumCachedFormats];
@@ -94,6 +98,8 @@ static VCConvertedFrameEntry VCConvertedFrameEntries[VCMaximumCachedFormats];
 static size_t VCPixelBufferPoolEntryCount = 0;
 static size_t VCConvertedFrameEntryCount = 0;
 static uint64_t VCPixelBufferPoolUseCounter = 0;
+static uint64_t VCConvertedFrameUseCounter = 0;
+static size_t VCConvertedFrameCachedBytes = 0;
 
 static CFDictionaryRef VCBoundedPixelBufferAllocationAttributes(void) {
     static NSDictionary *attributes;
@@ -159,6 +165,9 @@ static CIContext *VCSharedOrientationContext(void) {
 
 static void VCLockedClearConvertedFrames(void) {
     for (size_t index = 0; index < VCConvertedFrameEntryCount; index++) {
+        if (VCConvertedFrameEntries[index].sourceBuffer) {
+            CVPixelBufferRelease(VCConvertedFrameEntries[index].sourceBuffer);
+        }
         if (VCConvertedFrameEntries[index].buffer) {
             CVPixelBufferRelease(VCConvertedFrameEntries[index].buffer);
         }
@@ -171,6 +180,23 @@ static void VCLockedClearConvertedFrames(void) {
         VCConvertedFrameEntries[index] = (VCConvertedFrameEntry){0};
     }
     VCConvertedFrameEntryCount = 0;
+    VCConvertedFrameUseCounter = 0;
+    VCConvertedFrameCachedBytes = 0;
+}
+
+static BOOL VCLockedConvertedFrameMatchesTarget(
+    const VCConvertedFrameEntry *entry,
+    size_t width,
+    size_t height,
+    OSType pixelFormat,
+    BOOL aspectFill,
+    CMFormatDescriptionRef templateDescription) {
+    return entry && entry->buffer && entry->width == width &&
+        entry->height == height && entry->pixelFormat == pixelFormat &&
+        entry->aspectFill == aspectFill &&
+        (entry->templateDescription == templateDescription ||
+         (entry->templateDescription && templateDescription &&
+          CFEqual(entry->templateDescription, templateDescription)));
 }
 
 static CVPixelBufferRef VCLockedCopyConvertedFrame(
@@ -181,14 +207,16 @@ static CVPixelBufferRef VCLockedCopyConvertedFrame(
     BOOL aspectFill,
     CMFormatDescriptionRef templateDescription,
     CMVideoFormatDescriptionRef *replacementDescriptionOut) {
-    if (VCCachedSourceBuffer != source) return NULL;
     for (size_t index = 0; index < VCConvertedFrameEntryCount; index++) {
         VCConvertedFrameEntry *entry = &VCConvertedFrameEntries[index];
-        if (entry->width == width && entry->height == height &&
-            entry->pixelFormat == pixelFormat && entry->aspectFill == aspectFill &&
-            (entry->templateDescription == templateDescription ||
-             (entry->templateDescription && templateDescription &&
-              CFEqual(entry->templateDescription, templateDescription)))) {
+        if (entry->sourceBuffer == source &&
+            VCLockedConvertedFrameMatchesTarget(entry,
+                                                 width,
+                                                 height,
+                                                 pixelFormat,
+                                                 aspectFill,
+                                                 templateDescription)) {
+            entry->lastUse = ++VCConvertedFrameUseCounter;
             if (replacementDescriptionOut && entry->replacementDescription) {
                 *replacementDescriptionOut =
                     (CMVideoFormatDescriptionRef)CFRetain(entry->replacementDescription);
@@ -197,6 +225,117 @@ static CVPixelBufferRef VCLockedCopyConvertedFrame(
         }
     }
     return NULL;
+}
+
+static CVPixelBufferRef VCLockedCopyMostRecentConvertedFrame(
+    size_t width,
+    size_t height,
+    OSType pixelFormat,
+    BOOL aspectFill,
+    CMFormatDescriptionRef templateDescription,
+    CMVideoFormatDescriptionRef *replacementDescriptionOut) {
+    VCConvertedFrameEntry *newest = NULL;
+    for (size_t index = 0; index < VCConvertedFrameEntryCount; index++) {
+        VCConvertedFrameEntry *entry = &VCConvertedFrameEntries[index];
+        if (VCLockedConvertedFrameMatchesTarget(entry,
+                                                width,
+                                                height,
+                                                pixelFormat,
+                                                aspectFill,
+                                                templateDescription) &&
+            (!newest || entry->lastUse > newest->lastUse)) {
+            newest = entry;
+        }
+    }
+    if (!newest) return NULL;
+    newest->lastUse = ++VCConvertedFrameUseCounter;
+    if (replacementDescriptionOut && newest->replacementDescription) {
+        *replacementDescriptionOut =
+            (CMVideoFormatDescriptionRef)CFRetain(newest->replacementDescription);
+    }
+    return CVPixelBufferRetain(newest->buffer);
+}
+
+static void VCLockedRemoveConvertedFrameAtIndex(size_t index) {
+    if (index >= VCConvertedFrameEntryCount) return;
+    VCConvertedFrameEntry *entry = &VCConvertedFrameEntries[index];
+    VCConvertedFrameCachedBytes = entry->byteCost <= VCConvertedFrameCachedBytes
+        ? VCConvertedFrameCachedBytes - entry->byteCost : 0;
+    if (entry->sourceBuffer) CVPixelBufferRelease(entry->sourceBuffer);
+    if (entry->templateDescription) CFRelease(entry->templateDescription);
+    if (entry->replacementDescription) CFRelease(entry->replacementDescription);
+    if (entry->buffer) CVPixelBufferRelease(entry->buffer);
+    size_t finalIndex = VCConvertedFrameEntryCount - 1;
+    if (index != finalIndex) {
+        *entry = VCConvertedFrameEntries[finalIndex];
+    }
+    VCConvertedFrameEntries[finalIndex] = (VCConvertedFrameEntry){0};
+    VCConvertedFrameEntryCount--;
+}
+
+static size_t VCConvertedFrameByteCost(CVPixelBufferRef buffer) {
+    if (!buffer) return 0;
+    size_t byteCost = CVPixelBufferGetDataSize(buffer);
+    if (byteCost > 0) return byteCost;
+    size_t planeCount = CVPixelBufferGetPlaneCount(buffer);
+    if (planeCount == 0) {
+        size_t rowBytes = CVPixelBufferGetBytesPerRow(buffer);
+        size_t height = CVPixelBufferGetHeight(buffer);
+        return height > 0 && rowBytes <= SIZE_MAX / height ? rowBytes * height : 0;
+    }
+    for (size_t plane = 0; plane < planeCount; plane++) {
+        size_t rowBytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane);
+        size_t height = CVPixelBufferGetHeightOfPlane(buffer, plane);
+        if (height > 0 && rowBytes > SIZE_MAX / height) return 0;
+        size_t planeBytes = rowBytes * height;
+        if (planeBytes > SIZE_MAX - byteCost) return 0;
+        byteCost += planeBytes;
+    }
+    return byteCost;
+}
+
+static void VCLockedStoreConvertedFrame(
+    CVPixelBufferRef source,
+    size_t width,
+    size_t height,
+    OSType pixelFormat,
+    BOOL aspectFill,
+    CMFormatDescriptionRef templateDescription,
+    CMVideoFormatDescriptionRef replacementDescription,
+    CVPixelBufferRef buffer) {
+    size_t byteCost = VCConvertedFrameByteCost(buffer);
+    if (byteCost == 0 || byteCost > VCMaximumConvertedFrameCacheBytes) return;
+    while (VCConvertedFrameEntryCount >= VCMaximumCachedFormats ||
+           byteCost > VCMaximumConvertedFrameCacheBytes -
+               VCConvertedFrameCachedBytes) {
+        if (VCConvertedFrameEntryCount == 0) return;
+        size_t oldestIndex = 0;
+        for (size_t index = 1; index < VCConvertedFrameEntryCount; index++) {
+            if (VCConvertedFrameEntries[index].lastUse <
+                VCConvertedFrameEntries[oldestIndex].lastUse) {
+                oldestIndex = index;
+            }
+        }
+        VCLockedRemoveConvertedFrameAtIndex(oldestIndex);
+    }
+    size_t destinationIndex = VCConvertedFrameEntryCount++;
+    VCConvertedFrameEntries[destinationIndex] = (VCConvertedFrameEntry){
+        .sourceBuffer = CVPixelBufferRetain(source),
+        .width = width,
+        .height = height,
+        .pixelFormat = pixelFormat,
+        .aspectFill = aspectFill,
+        .templateDescription = templateDescription
+            ? (CMFormatDescriptionRef)CFRetain(templateDescription)
+            : NULL,
+        .replacementDescription = replacementDescription
+            ? (CMVideoFormatDescriptionRef)CFRetain(replacementDescription)
+            : NULL,
+        .buffer = CVPixelBufferRetain(buffer),
+        .byteCost = byteCost,
+        .lastUse = ++VCConvertedFrameUseCounter,
+    };
+    VCConvertedFrameCachedBytes += byteCost;
 }
 
 static void VCLockedReleasePixelBufferPools(void) {
@@ -401,10 +540,6 @@ void VCFlushFrameConverterCaches(BOOL releasePoolsAndSession) {
     os_unfair_lock_lock(&VCPixelTransferSessionLock);
     os_unfair_lock_lock(&VCFrameStateLock);
     VCLockedClearConvertedFrames();
-    if (VCCachedSourceBuffer) {
-        CVPixelBufferRelease(VCCachedSourceBuffer);
-        VCCachedSourceBuffer = NULL;
-    }
     if (releasePoolsAndSession) {
         VCLockedReleasePixelBufferPools();
     }
@@ -462,12 +597,6 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
     CVPixelBufferRef destination = NULL;
     os_unfair_lock_lock(&VCFrameStateLock);
 
-    if (VCCachedSourceBuffer != source) {
-        VCLockedClearConvertedFrames();
-        if (VCCachedSourceBuffer) CVPixelBufferRelease(VCCachedSourceBuffer);
-        VCCachedSourceBuffer = CVPixelBufferRetain(source);
-    }
-
     destination = VCLockedCopyConvertedFrame(source,
                                               width,
                                               height,
@@ -495,7 +624,35 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
     // Destination color-space and clean-aperture attachments can influence the
     // transfer. Install the camera template metadata before converting pixels.
     CVBufferPropagateAttachments(templateBuffer, destination);
-    os_unfair_lock_lock(&VCPixelTransferSessionLock);
+    BOOL ownsTransferLane = os_unfair_lock_trylock(&VCPixelTransferSessionLock);
+    if (!ownsTransferLane) {
+        // Camera graphs commonly fan one frame into preview, recording and
+        // metadata consumers. If another node is already converting, reuse the
+        // newest fully converted replacement for this exact target instead of
+        // blocking emitSampleBuffer and allowing the physical frame through.
+        os_unfair_lock_lock(&VCFrameStateLock);
+        CVPixelBufferRef ready = VCLockedCopyConvertedFrame(source,
+                                                             width,
+                                                             height,
+                                                             pixelFormat,
+                                                             aspectFill,
+                                                             templateDescription,
+                                                             replacementDescriptionOut);
+        if (!ready) {
+            ready = VCLockedCopyMostRecentConvertedFrame(width,
+                                                          height,
+                                                          pixelFormat,
+                                                          aspectFill,
+                                                          templateDescription,
+                                                          replacementDescriptionOut);
+        }
+        os_unfair_lock_unlock(&VCFrameStateLock);
+        if (ready) {
+            CVPixelBufferRelease(destination);
+            return ready;
+        }
+        os_unfair_lock_lock(&VCPixelTransferSessionLock);
+    }
     uint64_t sessionAcquired = mach_continuous_time();
 
     // A sibling output can finish the same conversion while this thread is
@@ -557,31 +714,17 @@ static CVPixelBufferRef VCCopyPixelBufferMatchingTemplateAndDescription(
     }
 
     os_unfair_lock_lock(&VCFrameStateLock);
-    BOOL cacheIsCurrent = VCCachedSourceBuffer == source;
-    if (cacheIsCurrent) {
-        if (VCConvertedFrameEntryCount >= VCMaximumCachedFormats) {
-            VCLockedClearConvertedFrames();
-        }
-        VCConvertedFrameEntries[VCConvertedFrameEntryCount++] = (VCConvertedFrameEntry){
-            .width = width,
-            .height = height,
-            .pixelFormat = pixelFormat,
-            .aspectFill = aspectFill,
-            .templateDescription = templateDescription
-                ? (CMFormatDescriptionRef)CFRetain(templateDescription)
-                : NULL,
-            .replacementDescription = replacementDescription,
-            .buffer = CVPixelBufferRetain(destination),
-        };
-        replacementDescription = NULL;
-    }
-
-    CMVideoFormatDescriptionRef returnedDescription = cacheIsCurrent
-        ? VCConvertedFrameEntries[VCConvertedFrameEntryCount - 1].replacementDescription
-        : replacementDescription;
-    if (replacementDescriptionOut && returnedDescription) {
+    VCLockedStoreConvertedFrame(source,
+                                width,
+                                height,
+                                pixelFormat,
+                                aspectFill,
+                                templateDescription,
+                                replacementDescription,
+                                destination);
+    if (replacementDescriptionOut && replacementDescription) {
         *replacementDescriptionOut =
-            (CMVideoFormatDescriptionRef)CFRetain(returnedDescription);
+            (CMVideoFormatDescriptionRef)CFRetain(replacementDescription);
     }
     os_unfair_lock_unlock(&VCFrameStateLock);
     if (replacementDescription) CFRelease(replacementDescription);

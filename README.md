@@ -5,7 +5,7 @@
 
 VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/麦克风插件。SpringBoard 进程只生成一份媒体流，`mediaserverd` 在 `CMCapture` 相机媒体图的 `BWNodeOutput` 处替换真实 `CMSampleBuffer`；照片、录像、视频通话、WebRTC 与扫码等下游因此读取同一份替换样本，而不是在界面上覆盖一层图片。
 
-当前版本：`2.13.0`
+当前版本：`2.14.0`
 
 > 正式 `.deb` 由 GitHub Actions 从当前提交构建并作为 `VirtualCamPro-rootless` artifact 发布；不要混用历史 2.8.0 二进制。
 
@@ -14,7 +14,7 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - 单生产者架构：只有 SpringBoard 负责屏幕捕获、网络拉流或本地媒体解码；`mediaserverd` 和应用进程不再各自拉流/解码。
 - 系统相机图替换：`mediaserverd` 在所有可识别的 `BWNodeOutput` 颜色/PCM 节点替换真实样本；压缩辅助流、深度、视差和元数据始终透传。
 - 逐样本自动回退：系统 Hook 给实际替换成功的 sample/pixel buffer 写可传播证据；应用内 `AVCaptureVideoDataOutput` 和音频输出只旁路该具体样本，预览与照片不会再被其他 CaptureSession 的全局心跳误关闭。限频健康状态仅用于诊断，不再决定正确性。
-- 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface，通知中只传递 Surface ID 与代次；消费者映射同一块物理内存，不复制或序列化整帧。
+- 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface，并通过一块常驻控制 IOSurface 原子发布帧代次、Surface ID 与时间戳；Darwin notify 只负责控制块建立/失效事件，消费者映射同一物理内存，不复制、序列化或逐帧查询通知状态。
 - 本地媒体：MP4/MOV 等视频可同时替换摄像头和麦克风；纯 MP3/M4A 只替换麦克风，画面继续使用物理摄像头。
 - 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”批量选择视频/音频，或从“照片”一次选择多段视频；无需手工输入路径。导入会逐个检查空间和音视频轨道，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
 - 屏幕镜像：SpringBoard 通过 CoreAnimation 直接渲染到 IOSurface，再交给系统相机管线。
@@ -22,7 +22,8 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - MJPEG：其他 HTTP/HTTPS URL 按连续 JPEG 流解析；增量校验 JPEG 段结构、直接读取 SOF 尺寸并限制单帧与接收缓冲。优先尝试实时 VideoToolbox→IOSurface NV12 解码，不支持时自动回退 ImageIO。
 - 网络流参数透传：手机不旋转、镜像、限帧、缩略或重编码网络帧，分辨率、方向、帧率和质量由 Windows/OBS 发送端决定；网络模式不发布替换音频，始终使用手机原生麦克风。
 - VideoToolbox 像素转换：输出尺寸、像素格式和时间戳跟随真实相机原始帧。
-- 转换结果缓存：同一来源帧经过多个相机图节点时复用已转换的像素缓冲；池/缓存锁与 VideoToolbox session lane 分离，等待线程获得 lane 后二次查缓存，减少 A10 上的阻塞和重复转换。
+- 转换结果缓存：多个来源代次和相机图节点可复用已转换像素缓冲；池/缓存锁与 VideoToolbox session lane 分离，lane 繁忙时同目标节点复用最近完成帧而不阻塞媒体图。缓存使用 LRU 且硬限制为 64 MiB，兼顾 A10 连续性与内存稳定。
+- 媒体图热分发：`BWNodeOutput` 原始实现按运行时类写入 128 槽无锁正向缓存，正常帧不再重复遍历类继承链和 Hook 表；动态加载的新子类仍会刷新对应项。
 - 节点与格式隔离：仅处理声明为视频的颜色像素输出；只有本地媒体发布的 PCM 才替换麦克风，网络/屏幕音频、深度、视差和压缩样本原样透传。
 - 内存压力恢复：iOS 警告或严重内存压力时释放转换帧、像素池和 VideoToolbox 会话，下一帧自动重建。
 - 自动重连与看门狗：首帧或后续帧超时时主动重建连接，退避最长 30 秒。

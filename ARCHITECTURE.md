@@ -57,8 +57,8 @@ SpringBoard 实例负责 `AVAssetStreamAdapter`、`VCScreenCaptureSource` 或 `V
 生产者要求所有输出缓冲带 `kCVPixelBufferIOSurfacePropertiesKey` 与 `kIOSurfaceIsGlobal`。发布时只做三件事：
 
 1. 在 3 槽环中 retain 当前 `CVPixelBuffer`，让消费者跨帧调度时仍能 lookup。
-2. 通过 notify state 发布 32 位 generation 与 32 位 `IOSurfaceID`，每个进程长期复用固定注册 token。
-3. 单独写入 `mach_continuous_time` 毫秒状态，用于旧帧策略和进程首次连接时的真实新鲜度判断；时间戳最多 10 Hz。媒体消费者本来就在相机回调/显示时钟中主动 `notify_get_state`，没有任何事件订阅者，因此共享总线只更新 64 位 state，不再调用 `notify_post`；音频 Surface 建立后依靠环内原子写指针推进，也不再为每个 PCM chunk 重写相同 Surface ID。
+2. 首次建立时通过 Darwin notify state 发布一块常驻控制 IOSurface 的 ID；每个进程长期复用固定注册 token，并只用 `notify_check` 侦测控制块建立或失效事件。
+3. 每帧只在控制 IOSurface 中以 C11 release/acquire 原子顺序写入 32 位 generation + 32 位数据 `IOSurfaceID` 以及 `mach_continuous_time` 毫秒时间戳。正常媒体热路径不再逐帧执行 `notify_get_state`、`notify_set_state` 或 `notify_post`。音频的新鲜度时间戳同样位于 PCM 环头部，Surface 通知只在环建立/失效时更新。
 
 消费者调用 `IOSurfaceLookup`，再用 `CVPixelBufferCreateWithIOSurface` 包装同一 Surface。该步骤只创建 CoreVideo 包装对象，不复制像素。返回给调用方的每个 wrapper 都拥有一个明确的 `IOSurfaceIncrementUseCount` lease，并且只能用 `VCReleaseSharedVideoPixelBuffer` 对称归还。并发线程争用同一缓存项时，代码先给缓存胜者增加自己的 lease，再归还落败 wrapper 的 lease，不依赖隐式所有权转移。包装对象按完整的 `generation + IOSurfaceID` 控制字缓存：同一帧经过多个相机输出节点时复用同一指针，从而命中像素转换缓存；同一 Surface 槽被新 generation 复用时一定创建新包装，不能误用上一轮转换结果。控制字在 lookup 前后不一致时最多重试三次。
 
@@ -80,7 +80,7 @@ SpringBoard 实例负责 `AVAssetStreamAdapter`、`VCScreenCaptureSource` 或 `V
 
 ## 系统媒体图替换
 
-Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampleBuffer:` 的子类，避免专用照片/录像输出类绕过基类实现。已替换样本带可传播的 sample/pixel-buffer attachment：同一系统图中的后续 Hook 看到标记后直接放行，应用层也能把“这个具体样本已替换”作为旁路证据；若中间私有节点丢弃未知 attachment，应用层会保守地再次执行 fallback，而不会泄露真实帧。每个候选类还要检查：
+Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampleBuffer:` 的子类，避免专用照片/录像输出类绕过基类实现。运行时类到原始 IMP 的解析结果进入 128 槽无锁正向缓存，正常帧不再为每个样本扫描继承链和最多 64 个 Hook；dyld 后续发现并 Hook 新子类时会覆盖该类的缓存项。已替换样本带可传播的 sample/pixel-buffer attachment：同一系统图中的后续 Hook 看到标记后直接放行，应用层也能把“这个具体样本已替换”作为旁路证据；若中间私有节点丢弃未知 attachment，应用层会保守地再次执行 fallback，而不会泄露真实帧。每个候选类还要检查：
 
 - `BWNodeOutput` 类和 `emitSampleBuffer:` 存在；
 - 参数数量为 3，返回值为 `void`，第三个参数为指针；
@@ -95,7 +95,7 @@ Hook 安装前先枚举 `BWNodeOutput` 基类以及所有直接覆写 `emitSampl
 
 视频由 `VTPixelTransferSession` 转成真实相机节点要求的宽、高、像素格式和缩放方式。只有 `CMVideoFormatDescriptionMatchesImageBuffer` 成功时才复用原描述，否则从新缓冲创建匹配描述。原样本 timing 与可传播 attachments 会复制到替换样本。
 
-同一源帧经过多个输出节点时，转换器按源 Surface、目标宽高、像素格式、缩放方式和格式描述语义复用结果；固定容量池限制每种格式最多 6 个在途缓冲，避免 A10 上的扇出分配失控。池/缓存状态锁与 `VTPixelTransferSession` 串行 lane 已拆开：缓存命中和池操作不再等待另一节点的 GPU 转换；等待 session 的线程获得 lane 后会二次查缓存，避免重复转换。PixelTransfer 本身仍是同步调用，4K、高帧率和多输出能力必须以 A10 真机测量为准。
+转换器按来源代次、目标宽高、像素格式、缩放方式和格式描述语义复用结果；它保留多个最近来源代次，使下一帧已经到达时，上一帧的其他输出节点仍能命中。固定容量池限制每种格式最多 6 个在途缓冲，转换缓存采用 LRU 并设置 64 MiB 总硬上限，避免 A10 上的 4K 扇出分配失控。池/缓存状态锁与 `VTPixelTransferSession` 串行 lane 已拆开：缓存命中和池操作不等待另一节点的 GPU 转换；若 lane 正忙，相同目标会复用最近完整转换帧，以当前相机样本 timing 继续输出，而不是阻塞 `emitSampleBuffer:` 或回退真实帧。冷启动尚无可复用帧时才等待 lane，获得后仍会二次查缓存。PixelTransfer 本身仍是同步调用，4K、高帧率和多输出能力必须以 A10 真机测量为准。
 
 ## 自动回退而不是手动模式
 

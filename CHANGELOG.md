@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.14.0 - 2026-08-14
+
+- Moved per-frame video generation/Surface ID/freshness into a persistent shared IOSurface control block and audio freshness into the PCM ring header. Darwin notify is now a lifecycle discovery channel only, eliminating per-frame cross-process state traffic while retaining retryable remapping after producer changes.
+- Preserved multiple converted source generations, added a non-blocking latest-complete-frame path when the VideoToolbox lane is occupied, and bounded the LRU converted-frame cache to 64 MiB so multi-node continuity cannot cause unbounded 4K memory growth.
+- Added a 128-slot lock-free runtime-class dispatch cache for `BWNodeOutput` original IMP lookup, with positive entries refreshed when later dyld scans hook a more specific subclass.
+- Hardened shared-control and audio-ring discovery against transient IOSurface lookup failures, Surface ID reuse and invalid protocol layouts, and added protocol alignment/freshness plus repository invariants for the new hot path.
+- Expanded the A10/iOS 15.8.8 device plan with notification-rate, producer-restart, cache-budget and contended multi-output evidence; private camera-graph behavior still requires the documented real-device acceptance run.
+
 ## 2.13.0 - 2026-08-14
 
 - Replaced the process-global system-heartbeat fallback gate with propagating per-sample and per-pixel-buffer evidence, then scoped compatibility-preview state to each `AVCaptureVideoDataOutput` inside its own `AVCaptureSession`; success in one camera graph can no longer suppress another graph's fallback.

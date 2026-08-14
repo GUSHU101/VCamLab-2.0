@@ -8,24 +8,18 @@
 #import <stdatomic.h>
 
 typedef NS_ENUM(NSUInteger, VCNotifyChannel) {
-    VCNotifyChannelVideoSurface = 0,
-    VCNotifyChannelVideoTimestamp,
+    VCNotifyChannelVideoControl = 0,
     VCNotifyChannelAudioSurface,
-    VCNotifyChannelAudioTimestamp,
     VCNotifyChannelVideoPipelineHeartbeat,
     VCNotifyChannelAudioPipelineHeartbeat,
     VCNotifyChannelCount,
 };
 
 static const char *VCNotifyChannelNames[VCNotifyChannelCount] = {
-    [VCNotifyChannelVideoSurface] =
-        "com.murkaska.virtualcampro/media.video.surface.v1",
-    [VCNotifyChannelVideoTimestamp] =
-        "com.murkaska.virtualcampro/media.video.timestamp.v1",
+    [VCNotifyChannelVideoControl] =
+        "com.murkaska.virtualcampro/media.video.control.v2",
     [VCNotifyChannelAudioSurface] =
-        "com.murkaska.virtualcampro/media.audio.surface.v1",
-    [VCNotifyChannelAudioTimestamp] =
-        "com.murkaska.virtualcampro/media.audio.timestamp.v1",
+        "com.murkaska.virtualcampro/media.audio.surface.v2",
     [VCNotifyChannelVideoPipelineHeartbeat] =
         "com.murkaska.virtualcampro/pipeline.video.heartbeat.v1",
     [VCNotifyChannelAudioPipelineHeartbeat] =
@@ -41,6 +35,7 @@ typedef struct {
     uint32_t reserved;
     _Atomic(uint64_t) totalFramesWritten;
     _Atomic(uint64_t) sequence;
+    _Atomic(uint64_t) timestampMilliseconds;
     float samples[];
 } VCSharedAudioRing;
 
@@ -69,11 +64,23 @@ static int VCNotifyTokenForChannel(VCNotifyChannel channel) {
     return channel < VCNotifyChannelCount ? tokens[channel] : -1;
 }
 
-static BOOL VCNotifyWriteState(VCNotifyChannel channel, uint64_t state) {
+static BOOL VCNotifyWriteState(VCNotifyChannel channel,
+                               uint64_t state,
+                               BOOL postNotification) {
     int token = VCNotifyTokenForChannel(channel);
     if (token < 0) return NO;
     uint32_t result = notify_set_state(token, state);
+    if (result == NOTIFY_STATUS_OK && postNotification) {
+        notify_post(VCNotifyChannelNames[channel]);
+    }
     return result == NOTIFY_STATUS_OK;
+}
+
+static BOOL VCNotifyCheckChanged(VCNotifyChannel channel) {
+    int token = VCNotifyTokenForChannel(channel);
+    if (token < 0) return YES;
+    int changed = 0;
+    return notify_check(token, &changed) != NOTIFY_STATUS_OK || changed != 0;
 }
 
 static BOOL VCNotifyReadState(VCNotifyChannel channel, uint64_t *state) {
@@ -84,8 +91,8 @@ static BOOL VCNotifyReadState(VCNotifyChannel channel, uint64_t *state) {
     return result == NOTIFY_STATUS_OK;
 }
 
-static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
-                            NSTimeInterval maximumAge) {
+static BOOL VCNotifyStateIsRecent(VCNotifyChannel timestampChannel,
+                                  NSTimeInterval maximumAge) {
     uint64_t timestamp = 0;
     if (!VCNotifyReadState(timestampChannel, &timestamp) || timestamp == 0) return NO;
     uint64_t now = VCMonotonicMilliseconds();
@@ -99,7 +106,9 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
     CVPixelBufferRef _surfaceRing[VC_SHARED_VIDEO_RING_SIZE];
     NSUInteger _ringIndex;
     uint32_t _generation;
-    uint64_t _lastTimestampStateMilliseconds;
+    IOSurfaceRef _controlSurface;
+    VCSharedVideoControl *_control;
+    BOOL _controlStatePublished;
 }
 @end
 
@@ -121,6 +130,44 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
     return self;
 }
 
+- (BOOL)ensureControlSurfaceLocked {
+    if (_controlSurface && _control) return YES;
+    size_t byteCount = sizeof(VCSharedVideoControl);
+    NSDictionary *properties = @{
+        (id)kIOSurfaceWidth: @(byteCount),
+        (id)kIOSurfaceHeight: @1,
+        (id)kIOSurfaceBytesPerElement: @1,
+        (id)kIOSurfaceBytesPerRow: @(byteCount),
+        (id)kIOSurfaceAllocSize: @(byteCount),
+        (id)kIOSurfaceIsGlobal: @YES,
+    };
+    IOSurfaceRef created = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+    if (!created) return NO;
+    IOSurfaceLock(created, 0, NULL);
+    VCSharedVideoControl *control =
+        (VCSharedVideoControl *)IOSurfaceGetBaseAddress(created);
+    if (control) {
+        memset(control, 0, byteCount);
+        control->magic = VC_SHARED_VIDEO_CONTROL_MAGIC;
+        control->version = VC_SHARED_VIDEO_CONTROL_VERSION;
+        atomic_init(&control->surfaceState, 0);
+        atomic_init(&control->timestampMilliseconds, 0);
+    }
+    IOSurfaceUnlock(created, 0, NULL);
+    if (!control) {
+        CFRelease(created);
+        return NO;
+    }
+    if (IOSurfaceGetID(created) == 0) {
+        CFRelease(created);
+        return NO;
+    }
+    _controlSurface = created;
+    _control = control;
+    _controlStatePublished = NO;
+    return YES;
+}
+
 - (BOOL)publishPixelBuffer:(CVPixelBufferRef)pixelBuffer {
     if (!pixelBuffer) return NO;
     IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixelBuffer);
@@ -135,32 +182,42 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
     CVPixelBufferRef retired = NULL;
     uint32_t generation = 0;
     uint64_t now = VCMonotonicMilliseconds();
-    BOOL timestampDue = NO;
+    IOSurfaceID controlSurfaceID = 0;
+    BOOL controlStateDue = NO;
 
     os_unfair_lock_lock(&_lock);
+    if (![self ensureControlSurfaceLocked]) {
+        os_unfair_lock_unlock(&_lock);
+        CVPixelBufferRelease(retained);
+        return NO;
+    }
     NSUInteger slot = _ringIndex++ % VC_SHARED_VIDEO_RING_SIZE;
     retired = _surfaceRing[slot];
     _surfaceRing[slot] = retained;
     generation = ++_generation;
     if (generation == 0) generation = ++_generation;
-    timestampDue = VCShouldPublishMediaTimestamp(
-        now, _lastTimestampStateMilliseconds);
+    uint64_t state = VCPackSurfaceState(generation, surfaceID);
+    atomic_store_explicit(&_control->timestampMilliseconds,
+                          now,
+                          memory_order_relaxed);
+    atomic_store_explicit(&_control->surfaceState, state, memory_order_release);
+    controlSurfaceID = IOSurfaceGetID(_controlSurface);
+    controlStateDue = !_controlStatePublished;
     os_unfair_lock_unlock(&_lock);
 
-    uint64_t state = VCPackSurfaceState(generation, surfaceID);
-    BOOL timestampPublished = !timestampDue ||
-        VCNotifyWriteState(VCNotifyChannelVideoTimestamp, now);
-    if (timestampDue && timestampPublished) {
+    BOOL controlStatePublished = !controlStateDue ||
+        VCNotifyWriteState(VCNotifyChannelVideoControl,
+                           (uint64_t)controlSurfaceID,
+                           YES);
+    if (controlStateDue && controlStatePublished) {
         os_unfair_lock_lock(&_lock);
-        if (now > _lastTimestampStateMilliseconds) {
-            _lastTimestampStateMilliseconds = now;
+        if (_controlSurface && IOSurfaceGetID(_controlSurface) == controlSurfaceID) {
+            _controlStatePublished = YES;
         }
         os_unfair_lock_unlock(&_lock);
     }
-    BOOL published = timestampPublished &&
-        VCNotifyWriteState(VCNotifyChannelVideoSurface, state);
     if (retired) CVPixelBufferRelease(retired);
-    return published;
+    return controlStatePublished;
 }
 
 - (void)invalidate {
@@ -172,10 +229,11 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
     }
     _ringIndex = 0;
     _generation++;
-    _lastTimestampStateMilliseconds = 0;
+    if (_control) {
+        atomic_store_explicit(&_control->timestampMilliseconds, 0, memory_order_relaxed);
+        atomic_store_explicit(&_control->surfaceState, 0, memory_order_release);
+    }
     os_unfair_lock_unlock(&_lock);
-    VCNotifyWriteState(VCNotifyChannelVideoTimestamp, 0);
-    VCNotifyWriteState(VCNotifyChannelVideoSurface, 0);
     for (NSUInteger index = 0; index < VC_SHARED_VIDEO_RING_SIZE; index++) {
         if (retired[index]) CVPixelBufferRelease(retired[index]);
     }
@@ -200,11 +258,18 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
     }
 }
 
-- (void)dealloc { [self invalidate]; }
+- (void)dealloc {
+    [self invalidate];
+    if (_controlSurface) CFRelease(_controlSurface);
+}
 @end
 
 @interface VCSharedVideoClient () {
     os_unfair_lock _lock;
+    IOSurfaceRef _controlSurface;
+    VCSharedVideoControl *_control;
+    IOSurfaceID _controlSurfaceID;
+    BOOL _controlRefreshPending;
     uint64_t _cachedSurfaceState;
     CVPixelBufferRef _cachedPixelBuffer;
 }
@@ -225,16 +290,92 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
     return self;
 }
 
+- (BOOL)refreshControlSurfaceLocked {
+    BOOL shouldRefresh = !_controlSurface || _controlRefreshPending ||
+        VCNotifyCheckChanged(VCNotifyChannelVideoControl);
+    if (!shouldRefresh) return _control != NULL;
+
+    uint64_t state = 0;
+    if (!VCNotifyReadState(VCNotifyChannelVideoControl, &state) || state == 0) {
+        if (_cachedPixelBuffer) CVPixelBufferRelease(_cachedPixelBuffer);
+        if (_controlSurface) CFRelease(_controlSurface);
+        _cachedPixelBuffer = NULL;
+        _cachedSurfaceState = 0;
+        _controlSurface = NULL;
+        _control = NULL;
+        _controlSurfaceID = 0;
+        _controlRefreshPending = NO;
+        return NO;
+    }
+    IOSurfaceID requestedID = (IOSurfaceID)state;
+    if (_controlSurface && _controlSurfaceID == requestedID && _control) {
+        _controlRefreshPending = NO;
+        return YES;
+    }
+
+    IOSurfaceRef surface = IOSurfaceLookup(requestedID);
+    if (!surface) {
+        _controlRefreshPending = YES;
+        return NO;
+    }
+    IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
+    VCSharedVideoControl *control =
+        (VCSharedVideoControl *)IOSurfaceGetBaseAddress(surface);
+    BOOL valid = control && control->magic == VC_SHARED_VIDEO_CONTROL_MAGIC &&
+        control->version == VC_SHARED_VIDEO_CONTROL_VERSION;
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    if (!valid) {
+        CFRelease(surface);
+        _controlRefreshPending = YES;
+        return NO;
+    }
+
+    if (_cachedPixelBuffer) CVPixelBufferRelease(_cachedPixelBuffer);
+    if (_controlSurface) CFRelease(_controlSurface);
+    _cachedPixelBuffer = NULL;
+    _cachedSurfaceState = 0;
+    _controlSurface = surface;
+    _control = control;
+    _controlSurfaceID = requestedID;
+    _controlRefreshPending = NO;
+    return YES;
+}
+
+- (BOOL)readControlSurfaceState:(uint64_t *)surfaceState
+           timestampMilliseconds:(uint64_t *)timestampMilliseconds {
+    os_unfair_lock_lock(&_lock);
+    BOOL valid = [self refreshControlSurfaceLocked];
+    uint64_t state = 0;
+    uint64_t timestamp = 0;
+    if (valid && _control) {
+        state = atomic_load_explicit(&_control->surfaceState, memory_order_acquire);
+        timestamp = atomic_load_explicit(&_control->timestampMilliseconds,
+                                         memory_order_relaxed);
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (surfaceState) *surfaceState = state;
+    if (timestampMilliseconds) *timestampMilliseconds = timestamp;
+    return valid;
+}
+
 - (CVPixelBufferRef)copyLatestPixelBufferWithMaximumAge:(NSTimeInterval)maximumAge {
-    if (!VCStateIsRecent(VCNotifyChannelVideoTimestamp, maximumAge)) return NULL;
+    uint64_t initialState = 0;
+    uint64_t timestamp = 0;
+    if (![self readControlSurfaceState:&initialState
+                 timestampMilliseconds:&timestamp]) return NULL;
+    uint64_t maximumAgeMilliseconds =
+        (uint64_t)(MAX(0.05, maximumAge) * 1000.0);
+    if (!VCSharedTimestampIsRecent(VCMonotonicMilliseconds(),
+                                   timestamp,
+                                   maximumAgeMilliseconds)) return NULL;
 
     // A producer can advance while we look up the surface. Retrying the control
     // word closes that race; the producer also retains three generations.
     for (NSUInteger attempt = 0; attempt < 3; attempt++) {
-        uint64_t before = 0;
-        if (!VCNotifyReadState(VCNotifyChannelVideoSurface, &before) || before == 0) {
-            return NULL;
-        }
+        uint64_t before = attempt == 0 ? initialState : 0;
+        if (attempt > 0 && ![self readControlSurfaceState:&before
+                                    timestampMilliseconds:NULL]) return NULL;
+        if (before == 0) return NULL;
         CVPixelBufferRef cached = NULL;
         os_unfair_lock_lock(&_lock);
         if (_cachedSurfaceState == before && _cachedPixelBuffer) {
@@ -249,7 +390,8 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
             }
             IOSurfaceIncrementUseCount(cachedSurface);
             uint64_t after = 0;
-            if (VCNotifyReadState(VCNotifyChannelVideoSurface, &after) && before == after) {
+            if ([self readControlSurfaceState:&after timestampMilliseconds:NULL] &&
+                before == after) {
                 return cached;
             }
             IOSurfaceDecrementUseCount(cachedSurface);
@@ -278,7 +420,8 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
         }
 
         uint64_t after = 0;
-        if (VCNotifyReadState(VCNotifyChannelVideoSurface, &after) && before == after) {
+        if ([self readControlSurfaceState:&after timestampMilliseconds:NULL] &&
+            before == after) {
             CVPixelBufferRef retired = NULL;
             CVPixelBufferRef raced = NULL;
             os_unfair_lock_lock(&_lock);
@@ -322,13 +465,20 @@ static BOOL VCStateIsRecent(VCNotifyChannel timestampChannel,
 }
 
 - (BOOL)hasPublishedFrameWithMaximumAge:(NSTimeInterval)maximumAge {
-    if (!VCStateIsRecent(VCNotifyChannelVideoTimestamp, maximumAge)) return NO;
     uint64_t state = 0;
-    return VCNotifyReadState(VCNotifyChannelVideoSurface, &state) && state != 0;
+    uint64_t timestamp = 0;
+    if (![self readControlSurfaceState:&state
+                 timestampMilliseconds:&timestamp] || state == 0) return NO;
+    uint64_t maximumAgeMilliseconds =
+        (uint64_t)(MAX(0.05, maximumAge) * 1000.0);
+    return VCSharedTimestampIsRecent(VCMonotonicMilliseconds(),
+                                     timestamp,
+                                     maximumAgeMilliseconds);
 }
 
 - (void)dealloc {
     if (_cachedPixelBuffer) CVPixelBufferRelease(_cachedPixelBuffer);
+    if (_controlSurface) CFRelease(_controlSurface);
 }
 @end
 
@@ -344,7 +494,6 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
     IOSurfaceRef _surface;
     VCSharedAudioRing *_ring;
     uint32_t _generation;
-    uint64_t _lastTimestampStateMilliseconds;
     BOOL _surfaceStatePublished;
 }
 @end
@@ -393,7 +542,13 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
         _ring->capacityFrames = VC_SHARED_AUDIO_CAPACITY_FRAMES;
     }
     IOSurfaceUnlock(_surface, 0, NULL);
-    return _ring != NULL;
+    if (!_ring || IOSurfaceGetID(_surface) == 0) {
+        CFRelease(_surface);
+        _surface = NULL;
+        _ring = NULL;
+        return NO;
+    }
+    return YES;
 }
 
 - (BOOL)publishInterleavedStereoSamples:(const float *)samples
@@ -402,7 +557,6 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
     IOSurfaceID surfaceID = 0;
     uint32_t generation = 0;
     uint64_t now = VCMonotonicMilliseconds();
-    BOOL timestampDue = NO;
     BOOL surfaceStateDue = NO;
     os_unfair_lock_lock(&_lock);
     if (![self ensureRingLocked]) {
@@ -425,48 +579,43 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
                           start + frameCount,
                           memory_order_release);
     atomic_fetch_add_explicit(&_ring->sequence, 1, memory_order_release);
+    atomic_store_explicit(&_ring->timestampMilliseconds,
+                          now,
+                          memory_order_release);
     IOSurfaceUnlock(_surface, 0, NULL);
     surfaceID = IOSurfaceGetID(_surface);
     generation = _generation;
-    timestampDue = VCShouldPublishMediaTimestamp(
-        now, _lastTimestampStateMilliseconds);
     surfaceStateDue = !_surfaceStatePublished;
     os_unfair_lock_unlock(&_lock);
 
     uint64_t state = VCPackSurfaceState(generation, surfaceID);
-    BOOL timestampPublished = !timestampDue ||
-        VCNotifyWriteState(VCNotifyChannelAudioTimestamp, now);
     BOOL surfaceStatePublished = !surfaceStateDue ||
-        VCNotifyWriteState(VCNotifyChannelAudioSurface, state);
-    if ((timestampDue && timestampPublished) ||
-        (surfaceStateDue && surfaceStatePublished)) {
+        VCNotifyWriteState(VCNotifyChannelAudioSurface, state, YES);
+    if (surfaceStateDue && surfaceStatePublished) {
         os_unfair_lock_lock(&_lock);
         if (_surface && IOSurfaceGetID(_surface) == surfaceID) {
-            if (timestampDue && timestampPublished &&
-                now > _lastTimestampStateMilliseconds) {
-                _lastTimestampStateMilliseconds = now;
-            }
-            if (surfaceStateDue && surfaceStatePublished) {
-                _surfaceStatePublished = YES;
-            }
+            _surfaceStatePublished = YES;
         }
         os_unfair_lock_unlock(&_lock);
     }
-    return timestampPublished && surfaceStatePublished;
+    return surfaceStatePublished;
 }
 
 - (void)invalidate {
     IOSurfaceRef surface = NULL;
     os_unfair_lock_lock(&_lock);
     surface = _surface;
+    if (_surface && _ring) {
+        IOSurfaceLock(_surface, 0, NULL);
+        atomic_store_explicit(&_ring->timestampMilliseconds, 0, memory_order_release);
+        IOSurfaceUnlock(_surface, 0, NULL);
+    }
     _surface = NULL;
     _ring = NULL;
     _generation++;
-    _lastTimestampStateMilliseconds = 0;
     _surfaceStatePublished = NO;
     os_unfair_lock_unlock(&_lock);
-    VCNotifyWriteState(VCNotifyChannelAudioTimestamp, 0);
-    VCNotifyWriteState(VCNotifyChannelAudioSurface, 0);
+    VCNotifyWriteState(VCNotifyChannelAudioSurface, 0, YES);
     if (surface) CFRelease(surface);
 }
 
@@ -477,10 +626,11 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
 @interface VCSharedAudioClient () {
     os_unfair_lock _lock;
     IOSurfaceRef _surface;
-    IOSurfaceID _surfaceID;
+    uint64_t _surfaceState;
     IOSurfaceID _readSurfaceID;
     uint64_t _nextReadFrame;
     BOOL _readCursorValid;
+    BOOL _surfaceRefreshPending;
 }
 @end
 
@@ -500,15 +650,49 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
 }
 
 - (IOSurfaceRef)copyCurrentSurface {
-    uint64_t state = 0;
-    if (!VCNotifyReadState(VCNotifyChannelAudioSurface, &state) || state == 0) return NULL;
-    IOSurfaceID requestedID = (IOSurfaceID)VCSurfaceIDFromState(state);
     os_unfair_lock_lock(&_lock);
-    if (!_surface || _surfaceID != requestedID) {
-        IOSurfaceRef replacement = IOSurfaceLookup(requestedID);
-        if (_surface) CFRelease(_surface);
-        _surface = replacement;
-        _surfaceID = replacement ? requestedID : 0;
+    BOOL shouldRefresh = !_surface || _surfaceRefreshPending ||
+        VCNotifyCheckChanged(VCNotifyChannelAudioSurface);
+    if (shouldRefresh) {
+        uint64_t state = 0;
+        if (!VCNotifyReadState(VCNotifyChannelAudioSurface, &state) || state == 0) {
+            if (_surface) CFRelease(_surface);
+            _surface = NULL;
+            _surfaceState = 0;
+            _readCursorValid = NO;
+            _surfaceRefreshPending = NO;
+            os_unfair_lock_unlock(&_lock);
+            return NULL;
+        }
+        IOSurfaceID requestedID = (IOSurfaceID)VCSurfaceIDFromState(state);
+        if (!_surface || _surfaceState != state) {
+            IOSurfaceRef replacement = IOSurfaceLookup(requestedID);
+            if (!replacement) {
+                _surfaceRefreshPending = YES;
+                os_unfair_lock_unlock(&_lock);
+                return NULL;
+            }
+            IOSurfaceLock(replacement, kIOSurfaceLockReadOnly, NULL);
+            VCSharedAudioRing *ring =
+                (VCSharedAudioRing *)IOSurfaceGetBaseAddress(replacement);
+            BOOL valid = ring && ring->magic == VC_SHARED_AUDIO_MAGIC &&
+                ring->version == VC_SHARED_AUDIO_VERSION &&
+                ring->sampleRate == VC_SHARED_AUDIO_SAMPLE_RATE &&
+                ring->channelCount == VC_SHARED_AUDIO_CHANNELS &&
+                ring->capacityFrames == VC_SHARED_AUDIO_CAPACITY_FRAMES;
+            IOSurfaceUnlock(replacement, kIOSurfaceLockReadOnly, NULL);
+            if (!valid) {
+                CFRelease(replacement);
+                _surfaceRefreshPending = YES;
+                os_unfair_lock_unlock(&_lock);
+                return NULL;
+            }
+            if (_surface) CFRelease(_surface);
+            _surface = replacement;
+            _surfaceState = state;
+            _readCursorValid = NO;
+        }
+        _surfaceRefreshPending = NO;
     }
     IOSurfaceRef result = _surface ? (IOSurfaceRef)CFRetain(_surface) : NULL;
     os_unfair_lock_unlock(&_lock);
@@ -517,8 +701,7 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
 
 - (BOOL)copyLatestInterleavedStereoFrames:(NSUInteger)frameCount
                                       into:(float *)destination {
-    if (!destination || frameCount == 0 ||
-        !VCStateIsRecent(VCNotifyChannelAudioTimestamp, 2.0)) return NO;
+    if (!destination || frameCount == 0) return NO;
     IOSurfaceRef surface = [self copyCurrentSurface];
     if (!surface) return NO;
     IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
@@ -528,6 +711,13 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
         ring->sampleRate == VC_SHARED_AUDIO_SAMPLE_RATE &&
         ring->channelCount == VC_SHARED_AUDIO_CHANNELS &&
         frameCount <= ring->capacityFrames;
+    if (valid) {
+        uint64_t timestamp = atomic_load_explicit(&ring->timestampMilliseconds,
+                                                   memory_order_acquire);
+        valid = VCSharedTimestampIsRecent(VCMonotonicMilliseconds(),
+                                          timestamp,
+                                          2000);
+    }
     if (valid) {
         uint64_t end = atomic_load_explicit(&ring->totalFramesWritten,
                                             memory_order_acquire);
@@ -570,9 +760,24 @@ void VCReleaseSharedVideoPixelBuffer(CVPixelBufferRef pixelBuffer) {
 }
 
 - (BOOL)hasPublishedAudioWithMaximumAge:(NSTimeInterval)maximumAge {
-    if (!VCStateIsRecent(VCNotifyChannelAudioTimestamp, maximumAge)) return NO;
-    uint64_t state = 0;
-    return VCNotifyReadState(VCNotifyChannelAudioSurface, &state) && state != 0;
+    IOSurfaceRef surface = [self copyCurrentSurface];
+    if (!surface) return NO;
+    IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL);
+    VCSharedAudioRing *ring = (VCSharedAudioRing *)IOSurfaceGetBaseAddress(surface);
+    BOOL valid = ring && ring->magic == VC_SHARED_AUDIO_MAGIC &&
+        ring->version == VC_SHARED_AUDIO_VERSION &&
+        ring->sampleRate == VC_SHARED_AUDIO_SAMPLE_RATE &&
+        ring->channelCount == VC_SHARED_AUDIO_CHANNELS;
+    uint64_t timestamp = valid
+        ? atomic_load_explicit(&ring->timestampMilliseconds, memory_order_acquire)
+        : 0;
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    CFRelease(surface);
+    uint64_t maximumAgeMilliseconds =
+        (uint64_t)(MAX(0.05, maximumAge) * 1000.0);
+    return valid && VCSharedTimestampIsRecent(VCMonotonicMilliseconds(),
+                                              timestamp,
+                                              maximumAgeMilliseconds);
 }
 
 - (void)dealloc {
@@ -599,12 +804,12 @@ void VCMarkSystemPipelineActivity(VCSharedMediaKind kind) {
         : VCNotifyChannelVideoPipelineHeartbeat;
     // Health readers poll state. Posting a Darwin notification here would add
     // IPC on the camera hot path without improving fallback correctness.
-    VCNotifyWriteState(channel, now);
+    VCNotifyWriteState(channel, now, NO);
 }
 
 BOOL VCSystemPipelineIsActive(VCSharedMediaKind kind, NSTimeInterval maximumAge) {
     VCNotifyChannel channel = kind == VCSharedMediaKindAudio
         ? VCNotifyChannelAudioPipelineHeartbeat
         : VCNotifyChannelVideoPipelineHeartbeat;
-    return VCStateIsRecent(channel, maximumAge);
+    return VCNotifyStateIsRecent(channel, maximumAge);
 }
