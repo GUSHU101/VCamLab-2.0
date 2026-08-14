@@ -15,6 +15,10 @@
 - `dpkg -i` 没有依赖或 maintainer-script 错误。
 - `/var/jb/Library/MobileSubstrate/DynamicLibraries/` 中存在两套 dylib 和 filter plist。
 - 设置中可见 VirtualCamPro，所有开关、URL 与滑块均可保存。
+- 顶部状态卡在停用、初始化、稳定产帧、断流保持、来源错误和来源未配置时分别显示正确状态；放大系统字体后标题、来源与管线文字不得截断或覆盖。右上角刷新按钮应立即更新，但页面滚动位置不能跳回顶部。
+- 在网络 URL 文本框持续编辑 30 秒并拖动本地 FPS/JPEG 滑块：每秒状态刷新只能更新带 `vcLiveStatus` 的只读行，键盘、光标、输入内容和滑块手势不得被打断；退出该设置页后不得继续产生一秒定时刷新。
+- 依次选择网络、屏幕和本地来源，确认页面只展示对应配置组且“当前配置/操作指引”同步变化。无 URL、本地文件未选择或已被外部删除时，顶部卡片必须明确提示先修复配置。
+- 本地媒体库行应显示导入文件总数和容量；查看列表时当前文件带实心标记，超过 15 项时有折叠提示，操作本身不得删除文件。复制运行诊断后检查文本不包含网络 URL query/fragment 或访问令牌。
 - 将来源设为“网络 HLS / MJPEG”，填写可持续输出的地址，再启用画面替换；随后分别测试屏幕镜像、本地视频和纯 MP3。
 - 完全退出相机相关应用后重新打开。
 - 日志出现 `mediaserverd BWNodeOutput hooks installed` 且 class 数量至少为 1；收到来源后只记录一次 `SpringBoard published first shared frame`，且尺寸符合来源与旋转设置。

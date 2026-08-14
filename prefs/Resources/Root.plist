@@ -8,7 +8,7 @@
             <key>cell</key><string>PSGroupCell</string>
             <key>label</key><string>VirtualCamPro</string>
             <key>footerText</key>
-            <string>网络流严格采用发送端的像素方向、分辨率、质量和帧率，不在手机上再次旋转、镜像、限帧或降质；网络流始终保留手机原生麦克风。</string>
+            <string>先选择来源，再按当前页面显示的分组完成配置。网络流参数由 OBS/发送端决定；旋转、镜像、FPS 和质量控件只作用于手机本地媒体。</string>
         </dict>
         <dict>
             <key>cell</key><string>PSSwitchCell</string>
@@ -17,26 +17,6 @@
             <key>key</key><string>enabled</string>
             <key>label</key><string>启用系统摄像头替换</string>
             <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
-        </dict>
-        <dict>
-            <key>cell</key><string>PSGroupCell</string>
-            <key>label</key><string>运行状态与恢复</string>
-            <key>footerText</key><string>来源状态反映 SpringBoard 是否持续产帧；系统视频管线仅在相机应用实际请求采集时才会显示 mediaserverd 活跃。状态是诊断信息，不作为关闭应用层逐样本 fallback 的全局门控。</string>
-        </dict>
-        <dict>
-            <key>cell</key><string>PSTitleValueCell</string>
-            <key>label</key><string>当前来源</string>
-            <key>get</key><string>currentSourceRuntimeStatus:</string>
-        </dict>
-        <dict>
-            <key>cell</key><string>PSTitleValueCell</string>
-            <key>label</key><string>系统视频管线</string>
-            <key>get</key><string>currentSystemVideoPipelineStatus:</string>
-        </dict>
-        <dict>
-            <key>cell</key><string>PSButtonCell</string>
-            <key>label</key><string>重载当前来源</string>
-            <key>action</key><string>reloadCurrentSource:</string>
         </dict>
         <dict>
             <key>cell</key><string>PSLinkListCell</string>
@@ -54,6 +34,17 @@
             <key>validValues</key>
             <array><integer>0</integer><integer>1</integer><integer>2</integer></array>
             <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>当前配置</string>
+            <key>get</key><string>currentSourceConfigurationSummary:</string>
+            <key>vcConfigurationStatus</key><true/>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>查看当前来源操作指引</string>
+            <key>action</key><string>showCurrentSourceGuide:</string>
         </dict>
 
         <dict>
@@ -77,6 +68,13 @@
             <key>label</key><string>检测当前网络流</string>
             <key>action</key><string>testStreamConnection:</string>
             <key>vcSourceTypes</key><array><integer>0</integer></array>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>传输端点</string>
+            <key>get</key><string>currentNetworkEndpointSummary:</string>
+            <key>vcSourceTypes</key><array><integer>0</integer></array>
+            <key>vcConfigurationStatus</key><true/>
         </dict>
 
         <dict>
@@ -115,15 +113,29 @@
         </dict>
         <dict>
             <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>已导入媒体库</string>
+            <key>get</key><string>currentLocalMediaLibrarySummary:</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>查看本地媒体库</string>
+            <key>action</key><string>showLocalMediaLibrary:</string>
+            <key>vcSourceTypes</key><array><integer>2</integer></array>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
             <key>label</key><string>音量键 Hook 状态</string>
             <key>get</key><string>currentLocalVolumeHookStatus:</string>
             <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>vcLiveStatus</key><true/>
         </dict>
         <dict>
             <key>cell</key><string>PSTitleValueCell</string>
             <key>label</key><string>SpringBoard 变换状态</string>
             <key>get</key><string>currentLocalTransformStatus:</string>
             <key>vcSourceTypes</key><array><integer>2</integer></array>
+            <key>vcLiveStatus</key><true/>
         </dict>
         <dict>
             <key>cell</key><string>PSButtonCell</string>
@@ -216,6 +228,34 @@
 
         <dict>
             <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>运行状态与恢复</string>
+            <key>footerText</key><string>页面可见时每秒刷新轻量状态，离开设置后自动停止。系统管线仅在相机应用实际采集时显示活跃；诊断心跳不会关闭任何 CaptureSession 的逐样本 fallback。</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>来源运行状态</string>
+            <key>get</key><string>currentSourceRuntimeStatus:</string>
+            <key>vcLiveStatus</key><true/>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>系统视频管线</string>
+            <key>get</key><string>currentSystemVideoPipelineStatus:</string>
+            <key>vcLiveStatus</key><true/>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>重载当前来源</string>
+            <key>action</key><string>reloadCurrentSource:</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSButtonCell</string>
+            <key>label</key><string>复制运行诊断信息</string>
+            <key>action</key><string>copyRuntimeDiagnostics:</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
             <key>label</key><string>稳定性</string>
             <key>footerText</key><string>断流保护仅决定替换帧过期后的行为；任何解码或私有节点失败都保持原相机/麦克风路径。</string>
         </dict>
@@ -237,6 +277,16 @@
             <key>max</key><real>30.0</real>
             <key>showValue</key><true/>
             <key>PostNotification</key><string>com.murkaska.virtualcampro/preferences.changed</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>关于</string>
+            <key>footerText</key><string>VirtualCamPro 替换 L2–L5 媒体样本，不伪装相机设备、Apple 组件或硬件传感器。私有 BWNodeOutput 的最终兼容性仍以目标 iOS 真机验收为准。</string>
+        </dict>
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>插件版本</string>
+            <key>get</key><string>currentPackageVersion:</string>
         </dict>
     </array>
     <key>title</key><string>VirtualCamPro</string>

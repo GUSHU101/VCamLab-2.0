@@ -20,7 +20,7 @@ export THEOS="$HOME/theos"
 make clean
 python3 scripts/validate_project.py
 make package FINALPACKAGE=1
-bash scripts/verify_deb.sh packages/com.murkaska.virtualcampro_2.15.0_iphoneos-arm64.deb
+bash scripts/verify_deb.sh packages/com.murkaska.virtualcampro_2.16.0_iphoneos-arm64.deb
 ```
 
 仅为 iPhone 7 Plus/A10 构建时，可临时减少到 arm64：
@@ -38,7 +38,7 @@ make package FINALPACKAGE=1 ARCHS=arm64
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-windows-standalone.ps1 `
-  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.15.0_iphoneos-arm64.deb" `
+  -PackagePath "D:\Packages\com.murkaska.virtualcampro_2.16.0_iphoneos-arm64.deb" `
   -CreateZip
 ```
 
@@ -73,7 +73,7 @@ install-phone.bat --setup PHONE_IP
 也可以把 `.deb` 完整路径作为第二个参数、SSH 端口作为第三个参数：
 
 ```bat
-install-phone.bat PHONE_IP "D:\Downloads\com.murkaska.virtualcampro_2.15.0_iphoneos-arm64.deb" 22
+install-phone.bat PHONE_IP "D:\Downloads\com.murkaska.virtualcampro_2.16.0_iphoneos-arm64.deb" 22
 ```
 
 工具固定使用 Windows OpenSSH 的交互式密码提示，不接收或保存密码。复制后还会核对上传字节数，并用手机端 `dpkg-deb` 验证包内 ID、版本和架构；安装后要求已安装版本精确一致，随后删除 `/var/mobile` 中的临时上传。默认用户是 `mobile`；可通过 `VCAM_PHONE_USER`、`VCAM_PHONE_PORT`、`VCAM_PHONE_HOST` 和 `VCAM_DEB_PATH` 环境变量覆盖。

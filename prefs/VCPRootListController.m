@@ -2,6 +2,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <AVFoundation/AVFoundation.h>
 #import <PhotosUI/PhotosUI.h>
+#import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #import <limits.h>
 #import <mach/mach_time.h>
@@ -35,6 +36,149 @@ typedef NS_ENUM(uint64_t, VCPStreamStatus) {
     VCPStreamStatusHoldingLastFrame = 4,
 };
 
+@interface VCPDashboardHeaderView : UIView
+@property (nonatomic, strong) UIView *cardView;
+@property (nonatomic, strong) UILabel *titleLabel;
+@property (nonatomic, strong) UILabel *versionLabel;
+@property (nonatomic, strong) UILabel *statusLabel;
+@property (nonatomic, strong) UILabel *sourceLabel;
+@property (nonatomic, strong) UILabel *pipelineLabel;
+- (void)updateEnabled:(BOOL)enabled
+               status:(VCPStreamStatus)status
+               source:(NSString *)source
+             pipeline:(NSString *)pipeline
+              version:(NSString *)version;
+@end
+
+@implementation VCPDashboardHeaderView
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    self.backgroundColor = UIColor.clearColor;
+
+    _cardView = [UIView new];
+    _cardView.translatesAutoresizingMaskIntoConstraints = NO;
+    _cardView.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
+    _cardView.layer.cornerRadius = 14.0;
+    _cardView.layer.cornerCurve = kCACornerCurveContinuous;
+    _cardView.accessibilityIdentifier = @"VirtualCamProStatusCard";
+    [self addSubview:_cardView];
+
+    _titleLabel = [UILabel new];
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    _titleLabel.adjustsFontForContentSizeCategory = YES;
+    _titleLabel.text = @"VirtualCamPro";
+    [_titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                                 forAxis:UILayoutConstraintAxisHorizontal];
+
+    _versionLabel = [UILabel new];
+    _versionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _versionLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    _versionLabel.adjustsFontForContentSizeCategory = YES;
+    _versionLabel.textColor = UIColor.secondaryLabelColor;
+    _versionLabel.textAlignment = NSTextAlignmentRight;
+    [_versionLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                   forAxis:UILayoutConstraintAxisHorizontal];
+
+    _statusLabel = [UILabel new];
+    _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _statusLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    _statusLabel.adjustsFontForContentSizeCategory = YES;
+    _statusLabel.numberOfLines = 2;
+
+    _sourceLabel = [UILabel new];
+    _sourceLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _sourceLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    _sourceLabel.adjustsFontForContentSizeCategory = YES;
+    _sourceLabel.textColor = UIColor.secondaryLabelColor;
+    _sourceLabel.numberOfLines = 2;
+
+    _pipelineLabel = [UILabel new];
+    _pipelineLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _pipelineLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    _pipelineLabel.adjustsFontForContentSizeCategory = YES;
+    _pipelineLabel.textColor = UIColor.tertiaryLabelColor;
+    _pipelineLabel.numberOfLines = 2;
+
+    [_cardView addSubview:_titleLabel];
+    [_cardView addSubview:_versionLabel];
+    [_cardView addSubview:_statusLabel];
+    [_cardView addSubview:_sourceLabel];
+    [_cardView addSubview:_pipelineLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [_cardView.topAnchor constraintEqualToAnchor:self.topAnchor constant:10.0],
+        [_cardView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:16.0],
+        [_cardView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-16.0],
+        [_cardView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-8.0],
+        [_titleLabel.topAnchor constraintEqualToAnchor:_cardView.topAnchor constant:15.0],
+        [_titleLabel.leadingAnchor constraintEqualToAnchor:_cardView.leadingAnchor constant:16.0],
+        [_versionLabel.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [_versionLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:_titleLabel.trailingAnchor
+                                                                 constant:8.0],
+        [_versionLabel.trailingAnchor constraintEqualToAnchor:_cardView.trailingAnchor constant:-16.0],
+        [_statusLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:11.0],
+        [_statusLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+        [_statusLabel.trailingAnchor constraintEqualToAnchor:_versionLabel.trailingAnchor],
+        [_sourceLabel.topAnchor constraintEqualToAnchor:_statusLabel.bottomAnchor constant:6.0],
+        [_sourceLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+        [_sourceLabel.trailingAnchor constraintEqualToAnchor:_versionLabel.trailingAnchor],
+        [_pipelineLabel.topAnchor constraintEqualToAnchor:_sourceLabel.bottomAnchor constant:5.0],
+        [_pipelineLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.leadingAnchor],
+        [_pipelineLabel.trailingAnchor constraintEqualToAnchor:_versionLabel.trailingAnchor],
+        [_pipelineLabel.bottomAnchor constraintEqualToAnchor:_cardView.bottomAnchor constant:-15.0],
+    ]];
+    return self;
+}
+
+- (void)updateEnabled:(BOOL)enabled
+               status:(VCPStreamStatus)status
+               source:(NSString *)source
+             pipeline:(NSString *)pipeline
+              version:(NSString *)version {
+    NSString *statusText = @"已停用 · 真实相机与麦克风保持原样";
+    UIColor *statusColor = UIColor.secondaryLabelColor;
+    BOOL sourceNeedsAttention = [source containsString:@"尚未"] ||
+                                [source containsString:@"无效"] ||
+                                [source containsString:@"不存在"];
+    if (enabled && sourceNeedsAttention) {
+        statusText = @"● 请先完成当前来源配置";
+        statusColor = UIColor.systemRedColor;
+    } else if (enabled) {
+        switch (status) {
+            case VCPStreamStatusConnecting:
+                statusText = @"● 正在初始化来源";
+                statusColor = UIColor.systemOrangeColor;
+                break;
+            case VCPStreamStatusReceiving:
+                statusText = @"● 替换来源正在工作";
+                statusColor = UIColor.systemGreenColor;
+                break;
+            case VCPStreamStatusError:
+                statusText = @"● 来源异常，正在自动恢复";
+                statusColor = UIColor.systemRedColor;
+                break;
+            case VCPStreamStatusHoldingLastFrame:
+                statusText = @"● 断流保护：保持最后一帧";
+                statusColor = UIColor.systemOrangeColor;
+                break;
+            default:
+                statusText = @"● 等待 SpringBoard 接管";
+                statusColor = UIColor.systemOrangeColor;
+                break;
+        }
+    }
+    self.statusLabel.text = statusText;
+    self.statusLabel.textColor = statusColor;
+    self.sourceLabel.text = [@"来源：" stringByAppendingString:source ?: @"未配置"];
+    self.pipelineLabel.text = [@"系统管线：" stringByAppendingString:pipeline ?: @"状态不可用"];
+    self.versionLabel.text = version.length > 0
+        ? [@"v" stringByAppendingString:version] : @"";
+}
+
+@end
+
 typedef NS_ENUM(NSInteger, VCLocalMediaImportError) {
     VCLocalMediaImportErrorInvalidSource = 1,
     VCLocalMediaImportErrorCreateDirectory = 2,
@@ -58,8 +202,9 @@ static NSString *VCSafeLocalMediaFilename(NSURL *sourceURL, NSString *suggestedN
     NSString *filename = suggestedName.lastPathComponent;
     if (filename.length == 0) filename = sourceURL.lastPathComponent;
     if (filename.length == 0) filename = @"media.mov";
-    NSCharacterSet *invalidCharacters =
-        [NSCharacterSet characterSetWithCharactersInString:@"/\\:"];
+    NSMutableCharacterSet *invalidCharacters =
+        [NSCharacterSet.controlCharacterSet mutableCopy];
+    [invalidCharacters addCharactersInString:@"/\\:"];
     filename = [[filename componentsSeparatedByCharactersInSet:invalidCharacters]
         componentsJoinedByString:@"_"];
     filename = [filename stringByTrimmingCharactersInSet:
@@ -69,6 +214,17 @@ static NSString *VCSafeLocalMediaFilename(NSURL *sourceURL, NSString *suggestedN
         filename = @"media.mov";
     }
     return filename;
+}
+
+static NSString *VCPDisplaySafeFilename(NSString *filename) {
+    if (![filename isKindOfClass:NSString.class] || filename.length == 0) {
+        return @"未命名媒体";
+    }
+    NSArray<NSString *> *parts = [filename componentsSeparatedByCharactersInSet:
+        NSCharacterSet.controlCharacterSet];
+    NSString *safe = [[parts componentsJoinedByString:@" "]
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return safe.length > 0 ? safe : @"未命名媒体";
 }
 
 static NSURL *VCUniqueLocalMediaDestination(NSString *directory, NSString *filename) {
@@ -251,6 +407,8 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 @property (nonatomic, strong) UIAlertController *streamTestAlert;
 @property (nonatomic, assign) BOOL localMediaImportInProgress;
 @property (nonatomic, strong) UIAlertController *localMediaImportAlert;
+@property (nonatomic, strong) VCPDashboardHeaderView *dashboardHeader;
+@property (nonatomic, strong) NSTimer *statusRefreshTimer;
 - (void)finishStreamTestWithTitle:(NSString *)title message:(NSString *)message;
 - (void)showStreamTestResultWithTitle:(NSString *)title message:(NSString *)message;
 - (void)beginImportingLocalMediaURLs:(NSArray<NSURL *> *)urls
@@ -261,13 +419,132 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
 - (void)showLocalMediaImportProgressWithMessage:(NSString *)message
                                       completion:(dispatch_block_t)completion;
 - (void)showLocalMediaResultWithTitle:(NSString *)title message:(NSString *)message;
+- (void)installDashboardHeaderIfNeeded;
+- (void)refreshRuntimePresentation;
+- (void)layoutDashboardHeaderIfNeeded;
+- (void)startStatusRefreshTimer;
+- (void)stopStatusRefreshTimer;
+- (NSArray<NSURL *> *)localMediaLibraryEntries;
+- (id)currentPackageVersion:(PSSpecifier *)specifier;
+- (id)currentNetworkEndpointSummary:(PSSpecifier *)specifier;
+- (id)currentSourceConfigurationSummary:(PSSpecifier *)specifier;
+- (id)currentLocalMediaName:(PSSpecifier *)specifier;
+- (id)currentLocalMediaLibrarySummary:(PSSpecifier *)specifier;
+- (id)currentSourceRuntimeStatus:(PSSpecifier *)specifier;
+- (id)currentSystemVideoPipelineStatus:(PSSpecifier *)specifier;
+- (id)currentLocalTransformStatus:(PSSpecifier *)specifier;
+- (id)currentLocalVolumeHookStatus:(PSSpecifier *)specifier;
 @end
 
 @implementation VCPRootListController
 
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"VirtualCamPro";
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
+                            target:self
+                            action:@selector(refreshControlPanel:)];
+    self.navigationItem.rightBarButtonItem.accessibilityLabel = @"刷新运行状态";
+    [self installDashboardHeaderIfNeeded];
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     if (_specifiers) [self reloadSpecifiers];
+    [self installDashboardHeaderIfNeeded];
+    [self refreshRuntimePresentation];
+    [self startStatusRefreshTimer];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self stopStatusRefreshTimer];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self layoutDashboardHeaderIfNeeded];
+}
+
+- (void)installDashboardHeaderIfNeeded {
+    UITableView *tableView = [self table];
+    if (!tableView) return;
+    if (!self.dashboardHeader) {
+        self.dashboardHeader = [[VCPDashboardHeaderView alloc]
+            initWithFrame:CGRectMake(0, 0, CGRectGetWidth(tableView.bounds), 150.0)];
+    }
+    if (tableView.tableHeaderView != self.dashboardHeader) {
+        tableView.tableHeaderView = self.dashboardHeader;
+    }
+    [self layoutDashboardHeaderIfNeeded];
+}
+
+- (void)layoutDashboardHeaderIfNeeded {
+    UITableView *tableView = [self table];
+    VCPDashboardHeaderView *header = self.dashboardHeader;
+    CGFloat width = CGRectGetWidth(tableView.bounds);
+    if (!tableView || !header || width <= 0) return;
+    header.frame = CGRectMake(0, 0, width, MAX(1.0, CGRectGetHeight(header.frame)));
+    CGSize fittingSize = [header systemLayoutSizeFittingSize:CGSizeMake(width, 1.0)
+                              withHorizontalFittingPriority:UILayoutPriorityRequired
+                                    verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
+    CGFloat height = MAX(142.0, ceil(fittingSize.height));
+    if (fabs(CGRectGetHeight(header.frame) - height) > 0.5 ||
+        fabs(CGRectGetWidth(header.frame) - width) > 0.5) {
+        header.frame = CGRectMake(0, 0, width, height);
+        tableView.tableHeaderView = header;
+    }
+}
+
+- (void)startStatusRefreshTimer {
+    if (self.statusRefreshTimer) return;
+    __weak VCPRootListController *weakSelf = self;
+    self.statusRefreshTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                              repeats:YES
+                                                                block:^(__unused NSTimer *timer) {
+        VCPRootListController *strongSelf = weakSelf;
+        if (strongSelf.view.window) [strongSelf refreshRuntimePresentation];
+    }];
+    self.statusRefreshTimer.tolerance = 0.20;
+}
+
+- (void)stopStatusRefreshTimer {
+    [self.statusRefreshTimer invalidate];
+    self.statusRefreshTimer = nil;
+}
+
+- (void)refreshControlPanel:(id)sender {
+    [self refreshRuntimePresentation];
+    UISelectionFeedbackGenerator *feedback = [UISelectionFeedbackGenerator new];
+    [feedback selectionChanged];
+}
+
+- (void)refreshRuntimePresentation {
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    id enabledValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
+    uint64_t rawStatus = VCPStreamStatusDisabled;
+    VCPGetSystemStreamStatus(&rawStatus);
+    VCPStreamStatus status = rawStatus <= VCPStreamStatusHoldingLastFrame
+        ? (VCPStreamStatus)rawStatus : VCPStreamStatusDisabled;
+    NSString *source = [self currentSourceConfigurationSummary:nil];
+    NSString *pipeline = [self currentSystemVideoPipelineStatus:nil];
+    NSString *version = [self currentPackageVersion:nil];
+    [self.dashboardHeader updateEnabled:[enabledValue boolValue]
+                                 status:status
+                                 source:source
+                               pipeline:pipeline
+                                version:version];
+    [self layoutDashboardHeaderIfNeeded];
+
+    // Only lightweight, read-only status rows opt into the one-second refresh.
+    // Editing cells and sliders are never reloaded under the user's finger.
+    for (PSSpecifier *specifier in [_specifiers copy]) {
+        if ([[specifier propertyForKey:@"vcLiveStatus"] boolValue]) {
+            [self reloadSpecifier:specifier animated:NO];
+        }
+    }
 }
 
 - (NSArray *)specifiers {
@@ -275,7 +552,9 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
         CFPreferencesAppSynchronize(VCPreferencesDomain);
         id sourceValue = CFBridgingRelease(
             CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
-        NSNumber *sourceType = @([sourceValue integerValue]);
+        NSInteger sourceTypeValue = [sourceValue integerValue];
+        if (sourceTypeValue < 0 || sourceTypeValue > 2) sourceTypeValue = 0;
+        NSNumber *sourceType = @(sourceTypeValue);
         NSArray *allSpecifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
         NSMutableArray *visible = [NSMutableArray arrayWithCapacity:allSpecifiers.count];
         for (PSSpecifier *specifier in allSpecifiers) {
@@ -296,6 +575,10 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
         NSInteger roundedFPS = (NSInteger)llround([value doubleValue]);
         value = @(MAX(1, MIN(240, roundedFPS)));
     }
+    if ([key isEqualToString:@"streamURL"] && [value isKindOfClass:NSString.class]) {
+        value = [value stringByTrimmingCharactersInSet:
+            NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    }
     [super setPreferenceValue:value specifier:specifier];
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          VCPreferencesChangedNotification,
@@ -306,6 +589,12 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
         _specifiers = nil;
         [self reloadSpecifiers];
     }
+    for (PSSpecifier *statusSpecifier in [_specifiers copy]) {
+        if ([[statusSpecifier propertyForKey:@"vcConfigurationStatus"] boolValue]) {
+            [self reloadSpecifier:statusSpecifier animated:NO];
+        }
+    }
+    [self refreshRuntimePresentation];
 }
 
 - (void)chooseLocalMedia:(PSSpecifier *)specifier {
@@ -363,6 +652,95 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
     [self presentViewController:sheet animated:YES completion:nil];
 }
 
+- (id)currentPackageVersion:(PSSpecifier *)specifier {
+    NSString *version = [[NSBundle bundleForClass:self.class]
+        objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    return [version isKindOfClass:NSString.class] && version.length > 0
+        ? version : @"未知";
+}
+
+- (id)currentNetworkEndpointSummary:(PSSpecifier *)specifier {
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    id value = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("streamURL"), VCPreferencesDomain));
+    if (![value isKindOfClass:NSString.class] || [value length] == 0) {
+        return @"尚未配置 URL";
+    }
+    NSURL *url = [NSURL URLWithString:[value stringByTrimmingCharactersInSet:
+        NSCharacterSet.whitespaceAndNewlineCharacterSet]];
+    NSString *scheme = url.scheme.lowercaseString;
+    if ((!([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"])) ||
+        url.host.length == 0 || url.user.length > 0 || url.password.length > 0 ||
+        url.fragment.length > 0 || url.absoluteString.length > 4096) {
+        return @"URL 格式无效";
+    }
+    BOOL hls = [url.absoluteString.lowercaseString containsString:@".m3u8"];
+    NSString *host = url.port
+        ? [NSString stringWithFormat:@"%@:%@", url.host, url.port] : url.host;
+    return [NSString stringWithFormat:@"%@ · %@", hls ? @"HLS" : @"MJPEG", host];
+}
+
+- (id)currentSourceConfigurationSummary:(PSSpecifier *)specifier {
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    id sourceValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
+    switch ([sourceValue integerValue]) {
+        case 1:
+            return @"设备屏幕实时镜像 · 系统方向";
+        case 2: {
+            NSString *name = [self currentLocalMediaName:nil];
+            if ([name isEqualToString:@"尚未选择"]) {
+                return @"手机本地媒体 · 尚未选择文件";
+            }
+            id pathValue = CFBridgingRelease(
+                CFPreferencesCopyAppValue(VCLocalMediaPathKey, VCPreferencesDomain));
+            if (![pathValue isKindOfClass:NSString.class] ||
+                ![NSFileManager.defaultManager fileExistsAtPath:pathValue]) {
+                return [NSString stringWithFormat:@"手机本地媒体 · %@（文件不存在）", name];
+            }
+            return [@"手机本地媒体 · " stringByAppendingString:name];
+        }
+        default:
+            return [@"网络流 · " stringByAppendingString:
+                [self currentNetworkEndpointSummary:nil]];
+    }
+}
+
+- (NSArray<NSURL *> *)localMediaLibraryEntries {
+    NSArray<NSURL *> *entries = [NSFileManager.defaultManager
+        contentsOfDirectoryAtURL:[NSURL fileURLWithPath:VCLocalMediaDirectory isDirectory:YES]
+       includingPropertiesForKeys:@[NSURLIsRegularFileKey, NSURLFileSizeKey]
+                          options:NSDirectoryEnumerationSkipsHiddenFiles
+                            error:nil];
+    NSIndexSet *regularIndexes = [entries indexesOfObjectsPassingTest:^BOOL(
+        NSURL *entry, NSUInteger index, BOOL *stop) {
+        NSNumber *regular = nil;
+        [entry getResourceValue:&regular forKey:NSURLIsRegularFileKey error:nil];
+        return regular.boolValue;
+    }];
+    return [[entries objectsAtIndexes:regularIndexes]
+        sortedArrayUsingComparator:^NSComparisonResult(NSURL *left, NSURL *right) {
+        return [left.lastPathComponent localizedStandardCompare:right.lastPathComponent];
+    }];
+}
+
+- (id)currentLocalMediaLibrarySummary:(PSSpecifier *)specifier {
+    NSArray<NSURL *> *entries = [self localMediaLibraryEntries];
+    unsigned long long totalBytes = 0;
+    for (NSURL *entry in entries) {
+        NSNumber *fileSize = nil;
+        [entry getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        unsigned long long bytes = fileSize.unsignedLongLongValue;
+        totalBytes = ULLONG_MAX - totalBytes < bytes ? ULLONG_MAX : totalBytes + bytes;
+    }
+    NSByteCountFormatter *formatter = [NSByteCountFormatter new];
+    formatter.countStyle = NSByteCountFormatterCountStyleFile;
+    NSString *size = [formatter stringFromByteCount:
+        totalBytes > (unsigned long long)LLONG_MAX ? LLONG_MAX : (long long)totalBytes];
+    return [NSString stringWithFormat:@"%lu 个文件 · %@",
+        (unsigned long)entries.count, size ?: @"0 字节"];
+}
+
 - (id)currentLocalMediaName:(PSSpecifier *)specifier {
     CFPreferencesAppSynchronize(VCPreferencesDomain);
     id pathValue = CFBridgingRelease(
@@ -371,7 +749,7 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
         return @"尚未选择";
     }
     NSString *filename = [pathValue lastPathComponent];
-    return filename.length > 0 ? filename : @"尚未选择";
+    return filename.length > 0 ? VCPDisplaySafeFilename(filename) : @"尚未选择";
 }
 
 - (id)currentLocalVideoPlaylistSummary:(PSSpecifier *)specifier {
@@ -495,6 +873,123 @@ static BOOL VCPGetNotifyState(const char *name, uint64_t *stateOut) {
     [self reloadSpecifiers];
     [self showLocalMediaResultWithTitle:@"已请求重载"
                                 message:@"SpringBoard 正在原子停止并重建当前来源；URL、本地文件和画面参数均保持不变。"];
+}
+
+- (void)showCurrentSourceGuide:(PSSpecifier *)specifier {
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    id sourceValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("sourceType"), VCPreferencesDomain));
+    NSString *title = @"网络流使用顺序";
+    NSString *message = @"1. 在 Windows 控制中心启动 OBS 桥接。\n2. 填写手机可访问的 HTTP/HTTPS URL。\n3. 点击“检测当前网络流”。\n4. 启用替换并重新打开相机应用。\n\n网络方向、帧率和质量全部由 OBS/发送端决定；手机保留原生麦克风。";
+    switch ([sourceValue integerValue]) {
+        case 1:
+            title = @"屏幕镜像使用顺序";
+            message = @"1. 选择设备屏幕实时镜像。\n2. 启用系统摄像头替换。\n3. 打开目标相机应用。\n\n屏幕方向和刷新节奏自动跟随设备；本地视频的旋转、镜像、FPS 和质量设置不会作用于屏幕来源。";
+            break;
+        case 2:
+            title = @"本地媒体使用顺序";
+            message = @"1. 点击“选择本地视频 / 音频”完成导入。\n2. 调整本地视频专用的旋转、镜像、FPS 和质量。\n3. 启用替换并打开相机应用。\n\n同一目录至少有两段视频时，音量加/减可切换下一段/上一段；纯音频文件只替换麦克风。";
+            break;
+        default:
+            break;
+    }
+    [self showLocalMediaResultWithTitle:title message:message];
+}
+
+- (void)showLocalMediaLibrary:(PSSpecifier *)specifier {
+    NSArray<NSURL *> *entries = [self localMediaLibraryEntries];
+    NSString *selectedName = [self currentLocalMediaName:nil];
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    NSUInteger visibleCount = MIN((NSUInteger)15, entries.count);
+    NSByteCountFormatter *formatter = [NSByteCountFormatter new];
+    formatter.countStyle = NSByteCountFormatterCountStyleFile;
+    for (NSUInteger index = 0; index < visibleCount; index++) {
+        NSURL *entry = entries[index];
+        NSNumber *fileSize = nil;
+        [entry getResourceValue:&fileSize forKey:NSURLFileSizeKey error:nil];
+        NSString *size = [formatter stringFromByteCount:fileSize.longLongValue];
+        NSString *displayName = VCPDisplaySafeFilename(entry.lastPathComponent);
+        NSString *marker = [displayName isEqualToString:selectedName] ? @"●" : @"○";
+        [lines addObject:[NSString stringWithFormat:@"%@ %@  %@",
+            marker, displayName, size ?: @""]];
+    }
+    if (entries.count > visibleCount) {
+        [lines addObject:[NSString stringWithFormat:@"…另有 %lu 个文件",
+            (unsigned long)(entries.count - visibleCount)]];
+    }
+    NSString *message = entries.count > 0
+        ? [lines componentsJoinedByString:@"\n"]
+        : @"媒体库目前为空。请使用“选择本地视频 / 音频”导入文件。";
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+        [NSString stringWithFormat:@"本地媒体库 · %@",
+            [self currentLocalMediaLibrarySummary:nil]]
+                                                                    message:message
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"复制媒体目录"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(__unused UIAlertAction *action) {
+        UIPasteboard.generalPasteboard.string = VCLocalMediaDirectory;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"关闭"
+                                             style:UIAlertActionStyleCancel
+                                           handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)copyRuntimeDiagnostics:(PSSpecifier *)specifier {
+    CFPreferencesAppSynchronize(VCPreferencesDomain);
+    id enabledValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("enabled"), VCPreferencesDomain));
+    id holdValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("holdLastFrame"), VCPreferencesDomain));
+    id staleValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("staleFrameTimeout"), VCPreferencesDomain));
+    id fpsValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("preferredFPS"), VCPreferencesDomain));
+    id rotationValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("sourceRotation"), VCPreferencesDomain));
+    id mirrorValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("mirrorSource"), VCPreferencesDomain));
+    id dimensionValue = CFBridgingRelease(
+        CFPreferencesCopyAppValue(CFSTR("maximumPixelDimension"), VCPreferencesDomain));
+    NSISO8601DateFormatter *dateFormatter = [NSISO8601DateFormatter new];
+    NSString *report = [NSString stringWithFormat:
+        @"VirtualCamPro %@ runtime diagnostics\n"
+         "generated=%@\n"
+         "device=%@ / iOS %@\n"
+         "enabled=%@\n"
+         "source=%@\n"
+         "sourceStatus=%@\n"
+         "systemVideoPipeline=%@\n"
+         "networkEndpoint=%@\n"
+         "localMedia=%@\n"
+         "localLibrary=%@\n"
+         "localTransform=%@\n"
+         "volumeHook=%@\n"
+         "localFPS=%@ rotation=%@ mirror=%@ maxDimension=%@\n"
+         "holdLastFrame=%@ staleTimeout=%@\n",
+        [self currentPackageVersion:nil],
+        [dateFormatter stringFromDate:NSDate.date],
+        UIDevice.currentDevice.model,
+        UIDevice.currentDevice.systemVersion,
+        [enabledValue boolValue] ? @"yes" : @"no",
+        [self currentSourceConfigurationSummary:nil],
+        [self currentSourceRuntimeStatus:nil],
+        [self currentSystemVideoPipelineStatus:nil],
+        [self currentNetworkEndpointSummary:nil],
+        [self currentLocalMediaName:nil],
+        [self currentLocalMediaLibrarySummary:nil],
+        [self currentLocalTransformStatus:nil],
+        [self currentLocalVolumeHookStatus:nil],
+        fpsValue ?: @60,
+        rotationValue ?: @0,
+        [mirrorValue boolValue] ? @"yes" : @"no",
+        dimensionValue ?: @1920,
+        holdValue ? ([holdValue boolValue] ? @"yes" : @"no") : @"yes",
+        staleValue ?: @8];
+    UIPasteboard.generalPasteboard.string = report;
+    [self showLocalMediaResultWithTitle:@"诊断信息已复制"
+                                message:@"已复制运行状态和安全化来源摘要；网络 URL 的查询参数和访问令牌不会写入诊断文本。"];
 }
 
 - (void)clearLocalMedia:(PSSpecifier *)specifier {
@@ -1005,6 +1500,7 @@ didCompleteWithError:(NSError *)error {
 }
 
 - (void)dealloc {
+    [self stopStatusRefreshTimer];
     [self.streamTestTask cancel];
     [self.streamTestSession invalidateAndCancel];
 }

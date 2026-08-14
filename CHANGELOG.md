@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.16.0 - 2026-08-14
+
+- Rebuilt the iOS PreferenceLoader page around a dynamic, accessibility-aware status card that shows enablement, selected source, SpringBoard producer health and recent mediaserverd video activity without requiring the user to interpret raw controls.
+- Added a one-second visible-page refresh loop limited to explicitly read-only status rows; it stops when the controller disappears, never reloads URL editors/sliders during input, and provides a manual navigation-bar refresh action.
+- Reordered the control panel into source selection, source-specific controls, runtime recovery, stability and version sections. Every source now has an in-context operation guide, configuration summary and missing/invalid source warning.
+- Added a read-only local media library viewer with naturally sorted filenames, current-item marker, file count and aggregate storage, while preserving the existing non-destructive import/clear behavior.
+- Added clipboard diagnostics covering device/iOS, source, pipeline, local transform, volume hook and stability state. Network output is deliberately limited to protocol plus host, so URL query parameters and access tokens are not copied.
+- Extended repository validation to lock down dashboard lifecycle, live-row scope, required actions/frameworks and diagnostic redaction before a UI release can pass CI.
+
 ## 2.15.0 - 2026-08-14
 
 - Replaced the process-global local-audio read position with an independent cursor per `BWNodeOutput` and application output, then added a 30 ms bounded startup reservoir so concurrent CaptureSessions neither steal PCM nor underflow at AVAssetReader batch boundaries.

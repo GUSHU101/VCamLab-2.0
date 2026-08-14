@@ -156,6 +156,25 @@ def validate_preferences() -> None:
     for action in ("chooseLocalMedia:", "clearLocalMedia:"):
         if actions.get(action, {}).get("vcSourceTypes") != [2]:
             fail(f"missing local-media-only settings action: {action}")
+    for action in (
+        "showCurrentSourceGuide:",
+        "reloadCurrentSource:",
+        "copyRuntimeDiagnostics:",
+    ):
+        if action not in actions:
+            fail(f"settings control panel is missing action: {action}")
+    if actions.get("showLocalMediaLibrary:", {}).get("vcSourceTypes") != [2]:
+        fail("local media library viewer must be local-media-only")
+    live_status_getters = {
+        item.get("get") for item in items if item.get("vcLiveStatus") is True
+    }
+    if live_status_getters != {
+        "currentSourceRuntimeStatus:",
+        "currentSystemVideoPipelineStatus:",
+        "currentLocalVolumeHookStatus:",
+        "currentLocalTransformStatus:",
+    }:
+        fail("settings live-refresh rows are incomplete or include editable controls")
     require(
         controller,
         (
@@ -179,10 +198,32 @@ def validate_preferences() -> None:
             "reloadCurrentSource:",
             "sourceRestartToken",
             "pipeline.video.heartbeat.v1",
+            "VCPDashboardHeaderView",
+            "systemLayoutSizeFittingSize",
+            "scheduledTimerWithTimeInterval:1.0",
+            "stopStatusRefreshTimer",
+            "vcLiveStatus",
+            "currentSourceConfigurationSummary:",
+            "currentNetworkEndpointSummary:",
+            "currentLocalMediaLibrarySummary:",
+            "showLocalMediaLibrary:",
+            "NSByteCountFormatter",
+            "VCPDisplaySafeFilename",
+            "controlCharacterSet",
+            "copyRuntimeDiagnostics:",
+            "UIPasteboard.generalPasteboard.string",
+            "showCurrentSourceGuide:",
         ),
-        "native source picker and runtime recovery",
+        "mobile source dashboard and runtime recovery",
     )
-    require(bundle_makefile, ("AVFoundation", "PhotosUI"), "preference bundle frameworks")
+    require(
+        bundle_makefile,
+        ("AVFoundation", "PhotosUI", "QuartzCore"),
+        "preference bundle frameworks",
+    )
+    if "query" in controller.split("copyRuntimeDiagnostics:", 1)[1].split(
+            "clearLocalMedia:", 1)[0]:
+        fail("copied runtime diagnostics must not include network query parameters")
     if "compatibilityMode" in keyed or "VCCompatibilityModeKey" in header:
         fail("the obsolete manual compatibility mode is still exposed")
     require(
