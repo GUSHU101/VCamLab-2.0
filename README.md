@@ -5,7 +5,7 @@
 
 VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/麦克风插件。SpringBoard 进程只生成一份媒体流，`mediaserverd` 在 `CMCapture` 相机媒体图的 `BWNodeOutput` 处替换真实 `CMSampleBuffer`；照片、录像、视频通话、WebRTC 与扫码等下游因此读取同一份替换样本，而不是在界面上覆盖一层图片。
 
-当前版本：`2.20.0`
+当前版本：`2.21.0`
 
 > 正式 `.deb` 由 GitHub Actions 从当前提交构建并作为 `VirtualCamPro-rootless` artifact 发布；不要混用历史 2.8.0 二进制。
 
@@ -17,7 +17,7 @@ VirtualCamPro 是面向 **rootless 越狱 iOS 15** 的系统级虚拟摄像头/�
 - 连续本地音频：每个系统节点和应用输出拥有独立 PCM 游标、约 30 ms 抗抖储备及带相位/前视样本的连续重采样上下文，多 CaptureSession 不会互相抢读或在 44.1/48 kHz 回调边界跳样。
 - 零拷贝进程间视频：SpringBoard 保留 3 槽全局 IOSurface，并通过一块常驻控制 IOSurface 原子发布帧代次、Surface ID 与时间戳；Darwin notify 只负责控制块建立/失效事件，消费者映射同一物理内存，不复制、序列化或逐帧查询通知状态。
 - 本地媒体：MP4/MOV 等视频可同时替换摄像头和麦克风；纯 MP3/M4A 只替换麦克风，画面继续使用物理摄像头。
-- 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”批量选择视频/音频，或从“照片”一次选择多段视频；无需手工输入路径。导入会逐个检查空间和音视频轨道，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
+- 原生媒体选择：在“替换来源”选择“手机本地视频 / 音频”后，点击“选择本地视频 / 音频”，可从“文件”批量选择视频/音频，或从“照片”一次选择多段视频；无需手工输入路径。导入与播放共用可取消、限时的异步轨道加载器，方向/尺寸只在首次播放前准备并供循环复用，再原子保存到 `/var/mobile/Media/VirtualCamPro/`。
 - 屏幕镜像：SpringBoard 通过 CoreAnimation 直接渲染到 IOSurface，再交给系统相机管线。
 - HLS：URL 中包含 `.m3u8` 时使用 `AVPlayerItemVideoOutput` 解码；轮询频率按发送端 nominal FPS 自适应，不再让 30/60 FPS 流固定消耗 240 Hz 主线程轮询。
 - MJPEG：其他 HTTP/HTTPS URL 按连续 JPEG 流解析；增量校验 JPEG 段结构、直接读取 SOF 尺寸并限制单帧与接收缓冲。优先尝试实时 VideoToolbox→IOSurface NV12 解码，不支持时自动回退 ImageIO。

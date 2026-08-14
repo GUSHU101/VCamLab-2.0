@@ -511,6 +511,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
 }
 
 - (void)stopHLSStreamImmediately {
+    AVAsset *loadingAsset = self.hlsPlayerItem.asset;
     if (self.observingPlayerItem && self.hlsPlayerItem) {
         [self.hlsPlayerItem removeObserver:self forKeyPath:@"status" context:VCPlayerItemStatusContext];
         self.observingPlayerItem = NO;
@@ -532,6 +533,7 @@ static CGColorSpaceRef VCSharedRGBColorSpace(void) {
     self.hlsPlayer = nil;
     self.hlsPlayerItem = nil;
     self.videoOutput = nil;
+    [loadingAsset cancelLoading];
 }
 
 #pragma mark - MJPEG
@@ -734,27 +736,52 @@ didReceiveResponse:(NSURLResponse *)response
 
 - (void)configureHLSFrameTimerForPlayerItem:(AVPlayerItem *)item {
     if (!item || !self.frameTimer) return;
-    float nominalFPS = 0;
-    for (AVPlayerItemTrack *itemTrack in item.tracks) {
-        AVAssetTrack *assetTrack = itemTrack.assetTrack;
-        if ([assetTrack.mediaType isEqualToString:AVMediaTypeVideo] &&
-            isfinite(assetTrack.nominalFrameRate) && assetTrack.nominalFrameRate > 0) {
-            nominalFPS = MAX(nominalFPS, assetTrack.nominalFrameRate);
+    AVAsset *asset = item.asset;
+    __weak AVAssetStreamAdapter *weakSelf = self;
+    [asset loadTracksWithMediaType:AVMediaTypeVideo
+                 completionHandler:^(NSArray<AVAssetTrack *> *videoTracks,
+                                     NSError *trackError) {
+        AVAssetStreamAdapter *strongSelf = weakSelf;
+        if (!strongSelf || trackError || videoTracks.count == 0) return;
+        dispatch_group_t propertyGroup = dispatch_group_create();
+        for (AVAssetTrack *videoTrack in videoTracks) {
+            dispatch_group_enter(propertyGroup);
+            [videoTrack loadValuesAsynchronouslyForKeys:@[@"nominalFrameRate"]
+                                      completionHandler:^{
+                dispatch_group_leave(propertyGroup);
+            }];
         }
-    }
-    NSInteger pollingFPS = nominalFPS > 0
-        ? (NSInteger)ceil(nominalFPS * 2.0) : VCHLSInitialPollingFPS;
-    pollingFPS = MAX(30, MIN(VCHLSMaximumPollingFPS, pollingFPS));
-    if (_hlsPollingFPS == pollingFPS) return;
-    _hlsPollingFPS = pollingFPS;
-    uint64_t interval = NSEC_PER_SEC / (uint64_t)pollingFPS;
-    dispatch_source_set_timer(self.frameTimer,
-                              dispatch_time(DISPATCH_TIME_NOW, 0),
-                              interval,
-                              MAX((uint64_t)1, interval / 10));
-    NSLog(@"[VirtualCamPro] HLS frame polling adapted to %ld Hz (nominal %.2f FPS)",
-          (long)pollingFPS,
-          nominalFPS);
+        dispatch_group_notify(propertyGroup, dispatch_get_main_queue(), ^{
+            AVAssetStreamAdapter *liveSelf = weakSelf;
+            if (!liveSelf || !liveSelf.running || item != liveSelf.hlsPlayerItem ||
+                !liveSelf.frameTimer) return;
+            float nominalFPS = 0;
+            for (AVAssetTrack *videoTrack in videoTracks) {
+                NSError *propertyError = nil;
+                AVKeyValueStatus status = [videoTrack
+                    statusOfValueForKey:@"nominalFrameRate"
+                                  error:&propertyError];
+                if (status != AVKeyValueStatusLoaded) continue;
+                float trackFPS = videoTrack.nominalFrameRate;
+                if (isfinite(trackFPS) && trackFPS > 0) {
+                    nominalFPS = MAX(nominalFPS, trackFPS);
+                }
+            }
+            NSInteger pollingFPS = nominalFPS > 0
+                ? (NSInteger)ceil(nominalFPS * 2.0) : VCHLSInitialPollingFPS;
+            pollingFPS = MAX(30, MIN(VCHLSMaximumPollingFPS, pollingFPS));
+            if (liveSelf->_hlsPollingFPS == pollingFPS) return;
+            liveSelf->_hlsPollingFPS = pollingFPS;
+            uint64_t interval = NSEC_PER_SEC / (uint64_t)pollingFPS;
+            dispatch_source_set_timer(liveSelf.frameTimer,
+                                      dispatch_time(DISPATCH_TIME_NOW, 0),
+                                      interval,
+                                      MAX((uint64_t)1, interval / 10));
+            NSLog(@"[VirtualCamPro] HLS frame polling adapted to %ld Hz (nominal %.2f FPS)",
+                  (long)pollingFPS,
+                  nominalFPS);
+        });
+    }];
 }
 
 - (void)releaseMJPEGDecompressionSession {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.21.0 - 2026-08-15
+
+- Unified Settings import and SpringBoard playback behind one bounded asynchronous video/audio track loader. Stopping or switching a local source now cancels pending AVFoundation metadata work within the reader lifecycle instead of leaving a stale load to finish later.
+- Asynchronously preloaded and cached each local video track's `preferredTransform` and `naturalSize` before playback. Looping no longer repeats container/geometry inspection, and slow metadata can no longer block the serial reader indefinitely before rotation is applied.
+- Made Photos imports require an actual video track while Files continues to accept either video or audio. An audio-only or incomplete Photos representation can no longer appear to import successfully and then fail as a video source.
+- Removed synchronous HLS `AVPlayerItem` track enumeration and nominal-FPS reads from the ready-to-play callback. Polling adaptation now loads video-track metadata asynchronously, ignores callbacks from a replaced player item and cancels outstanding asset loading on stop.
+- Extended repository invariants and the iOS 15.8.8 device plan to cover deferred track geometry, source-switch cancellation, loop reuse, Photos video validation and non-blocking HLS metadata adaptation.
+
 ## 2.20.0 - 2026-08-14
 
 - Replaced immediate synchronous local-file track inspection with bounded asynchronous `AVAsset` video/audio track loading, preventing Photos, iCloud and recently edited assets from being rejected before their track metadata is ready.

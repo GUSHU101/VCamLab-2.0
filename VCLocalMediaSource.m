@@ -1,5 +1,6 @@
 #import "VCLocalMediaSource.h"
 #import "VCLocalOrientationMath.h"
+#import "VCMediaTrackLoader.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <IOSurface/IOSurfaceRef.h>
@@ -8,6 +9,7 @@
 
 static NSString * const VCLocalMediaErrorDomain =
     @"com.murkaska.virtualcampro.local-media";
+static const NSTimeInterval VCLocalMediaTrackLoadingTimeout = 30.0;
 
 @interface VCLocalMediaSource ()
 @property (nonatomic, strong, readwrite) NSURL *fileURL;
@@ -16,6 +18,13 @@ static NSString * const VCLocalMediaErrorDomain =
 @property (atomic, assign, readwrite, getter=isTrackMirrored) BOOL trackMirrored;
 @property (atomic, assign) NSUInteger lifecycleGeneration;
 @property (atomic, strong) AVAssetReader *reader;
+@property (nonatomic, strong) AVURLAsset *loadingAsset;
+@property (nonatomic, strong) AVURLAsset *preparedAsset;
+@property (nonatomic, copy) NSArray<AVAssetTrack *> *preparedVideoTracks;
+@property (nonatomic, copy) NSArray<AVAssetTrack *> *preparedAudioTracks;
+@property (nonatomic, assign) CGAffineTransform preparedTrackTransform;
+@property (nonatomic, assign) CGSize preparedTrackNaturalSize;
+@property (nonatomic, assign) BOOL preparedTrackGeometryReady;
 @property (nonatomic, strong) dispatch_queue_t readerQueue;
 @property (nonatomic, strong) dispatch_semaphore_t wakeSemaphore;
 @end
@@ -51,12 +60,22 @@ static NSString * const VCLocalMediaErrorDomain =
 }
 
 - (void)stop {
+    AVURLAsset *loadingAsset = nil;
     @synchronized (self) {
         self.running = NO;
         self.lifecycleGeneration++;
+        loadingAsset = self.loadingAsset;
+        self.loadingAsset = nil;
+        self.preparedAsset = nil;
+        self.preparedVideoTracks = nil;
+        self.preparedAudioTracks = nil;
+        self.preparedTrackTransform = CGAffineTransformIdentity;
+        self.preparedTrackNaturalSize = CGSizeZero;
+        self.preparedTrackGeometryReady = NO;
         [self.reader cancelReading];
         self.reader = nil;
     }
+    [loadingAsset cancelLoading];
     dispatch_semaphore_signal(self.wakeSemaphore);
 }
 
@@ -106,10 +125,117 @@ static NSString * const VCLocalMediaErrorDomain =
 
 - (BOOL)readOnePassForGeneration:(NSUInteger)generation
                             error:(NSError **)errorOut {
-    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:self.fileURL
-                                            options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
-    NSArray<AVAssetTrack *> *videoTracks = [asset tracksWithMediaType:AVMediaTypeVideo];
-    NSArray<AVAssetTrack *> *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+    AVURLAsset *asset = nil;
+    NSArray<AVAssetTrack *> *videoTracks = nil;
+    NSArray<AVAssetTrack *> *audioTracks = nil;
+    CGAffineTransform preferredTransform = CGAffineTransformIdentity;
+    CGSize naturalSize = CGSizeZero;
+    BOOL geometryReady = NO;
+    @synchronized (self) {
+        if (!self.running || self.lifecycleGeneration != generation) return NO;
+        asset = self.preparedAsset;
+        videoTracks = self.preparedVideoTracks;
+        audioTracks = self.preparedAudioTracks;
+        preferredTransform = self.preparedTrackTransform;
+        naturalSize = self.preparedTrackNaturalSize;
+        geometryReady = self.preparedTrackGeometryReady;
+    }
+    if (!asset) {
+        asset = [AVURLAsset URLAssetWithURL:self.fileURL
+            options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
+        @synchronized (self) {
+            if (!self.running || self.lifecycleGeneration != generation) return NO;
+            self.loadingAsset = asset;
+        }
+        NSError *loadingError = nil;
+        VCMediaTrackLoadResult loadingResult = VCMediaLoadTracks(
+            asset,
+            VCLocalMediaTrackLoadingTimeout,
+            ^BOOL{
+                return ![self isGenerationCurrent:generation];
+            },
+            &videoTracks,
+            &audioTracks,
+            &loadingError);
+        VCMediaTrackLoadResult geometryResult = VCMediaTrackLoadResultLoaded;
+        if (loadingResult == VCMediaTrackLoadResultLoaded &&
+            ![self isGenerationCurrent:generation]) {
+            [asset cancelLoading];
+            geometryResult = VCMediaTrackLoadResultCancelled;
+        } else if (loadingResult == VCMediaTrackLoadResultLoaded &&
+                   videoTracks.firstObject) {
+            geometryResult = VCMediaLoadVideoTrackGeometry(
+                asset,
+                videoTracks.firstObject,
+                VCLocalMediaTrackLoadingTimeout,
+                ^BOOL{
+                    return ![self isGenerationCurrent:generation];
+                },
+                &preferredTransform,
+                &naturalSize,
+                &loadingError);
+            geometryReady = geometryResult == VCMediaTrackLoadResultLoaded;
+        } else if (loadingResult == VCMediaTrackLoadResultLoaded) {
+            geometryReady = YES;
+        }
+        BOOL current = NO;
+        @synchronized (self) {
+            if (self.loadingAsset == asset) self.loadingAsset = nil;
+            current = self.running && self.lifecycleGeneration == generation;
+            if (current && loadingResult == VCMediaTrackLoadResultLoaded &&
+                geometryResult == VCMediaTrackLoadResultLoaded &&
+                (videoTracks.count > 0 || audioTracks.count > 0)) {
+                self.preparedAsset = asset;
+                self.preparedVideoTracks = videoTracks ?: @[];
+                self.preparedAudioTracks = audioTracks ?: @[];
+                self.preparedTrackTransform = preferredTransform;
+                self.preparedTrackNaturalSize = naturalSize;
+                self.preparedTrackGeometryReady = geometryReady;
+            }
+        }
+        if (!current || loadingResult == VCMediaTrackLoadResultCancelled ||
+            geometryResult == VCMediaTrackLoadResultCancelled) return NO;
+        if (loadingResult == VCMediaTrackLoadResultTimedOut) {
+            if (errorOut) {
+                *errorOut = [NSError errorWithDomain:VCLocalMediaErrorDomain
+                                                 code:3
+                                             userInfo:@{NSLocalizedDescriptionKey:
+                                                 @"Timed out while loading local media tracks"}];
+            }
+            return NO;
+        }
+        if (geometryResult == VCMediaTrackLoadResultTimedOut) {
+            if (errorOut) {
+                *errorOut = [NSError errorWithDomain:VCLocalMediaErrorDomain
+                                                 code:5
+                                             userInfo:@{NSLocalizedDescriptionKey:
+                                                 @"Timed out while loading local video geometry"}];
+            }
+            return NO;
+        }
+        if (geometryResult == VCMediaTrackLoadResultFailed) {
+            if (errorOut) {
+                NSMutableDictionary *userInfo = [@{NSLocalizedDescriptionKey:
+                    @"AVFoundation could not load local video geometry"} mutableCopy];
+                if (loadingError) userInfo[NSUnderlyingErrorKey] = loadingError;
+                *errorOut = [NSError errorWithDomain:VCLocalMediaErrorDomain
+                                                 code:6
+                                             userInfo:userInfo];
+            }
+            return NO;
+        }
+        if (loadingResult == VCMediaTrackLoadResultFailed) {
+            if (errorOut) {
+                NSMutableDictionary *userInfo = [@{NSLocalizedDescriptionKey:
+                    @"AVFoundation could not load local media tracks"} mutableCopy];
+                if (loadingError) userInfo[NSUnderlyingErrorKey] = loadingError;
+                *errorOut = [NSError errorWithDomain:VCLocalMediaErrorDomain
+                                                 code:4
+                                             userInfo:userInfo];
+            }
+            return NO;
+        }
+    }
     if (videoTracks.count == 0 && audioTracks.count == 0) {
         if (errorOut) {
             *errorOut = [NSError errorWithDomain:VCLocalMediaErrorDomain
@@ -130,7 +256,15 @@ static NSString * const VCLocalMediaErrorDomain =
     AVAssetReaderTrackOutput *audioOutput = nil;
     if (videoTracks.firstObject) {
         AVAssetTrack *videoTrack = videoTracks.firstObject;
-        CGAffineTransform preferredTransform = videoTrack.preferredTransform;
+        if (!geometryReady) {
+            if (errorOut) {
+                *errorOut = [NSError errorWithDomain:VCLocalMediaErrorDomain
+                                                 code:7
+                                             userInfo:@{NSLocalizedDescriptionKey:
+                                                 @"Local video geometry was not prepared"}];
+            }
+            return NO;
+        }
         VCLocalTrackOrientation orientation = VCResolveLocalTrackOrientation(
             preferredTransform.a,
             preferredTransform.b,
@@ -142,7 +276,6 @@ static NSString * const VCLocalMediaErrorDomain =
         self.trackMirrored = trackMirrored;
         NSLog(@"[VirtualCamPro] Local track display transform: rotation=%ld mirror=%@",
               (long)trackRotation, trackMirrored ? @"YES" : @"NO");
-        CGSize naturalSize = videoTrack.naturalSize;
         // AVAssetReaderTrackOutput emits encoded pixel orientation; it does not
         // apply preferredTransform. Scale that actual raster here and leave all
         // orientation decisions to the explicit local-file controls downstream.

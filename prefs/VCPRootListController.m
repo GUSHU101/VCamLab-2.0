@@ -10,6 +10,7 @@
 #import <os/lock.h>
 
 #import "../VCJPEGParser.h"
+#import "../VCMediaTrackLoader.h"
 #import "../VCPreferenceValidation.h"
 
 static CFStringRef const VCPreferencesChangedNotification = CFSTR("com.murkaska.virtualcampro/preferences.changed");
@@ -129,37 +130,21 @@ static NSURL *VCUniqueLocalMediaDestination(NSString *directory, NSString *filen
 }
 
 static BOOL VCAssetContainsRecognizableMediaTracks(NSURL *url,
+                                                    BOOL requiresVideoTrack,
                                                     NSError **errorOut) {
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url
         options:@{AVURLAssetPreferPreciseDurationAndTimingKey: @NO}];
-    dispatch_group_t loadingGroup = dispatch_group_create();
-    __block NSArray<AVAssetTrack *> *videoTracks = nil;
-    __block NSArray<AVAssetTrack *> *audioTracks = nil;
-    __block NSError *videoError = nil;
-    __block NSError *audioError = nil;
-
-    dispatch_group_enter(loadingGroup);
-    [asset loadTracksWithMediaType:AVMediaTypeVideo
-                 completionHandler:^(NSArray<AVAssetTrack *> *tracks, NSError *error) {
-        videoTracks = tracks;
-        videoError = error;
-        dispatch_group_leave(loadingGroup);
-    }];
-    dispatch_group_enter(loadingGroup);
-    [asset loadTracksWithMediaType:AVMediaTypeAudio
-                 completionHandler:^(NSArray<AVAssetTrack *> *tracks, NSError *error) {
-        audioTracks = tracks;
-        audioError = error;
-        dispatch_group_leave(loadingGroup);
-    }];
-
-    int64_t timeoutNanoseconds =
-        (int64_t)(VCLocalMediaTrackLoadingTimeout * (NSTimeInterval)NSEC_PER_SEC);
-    long waitResult = dispatch_group_wait(
-        loadingGroup,
-        dispatch_time(DISPATCH_TIME_NOW, timeoutNanoseconds));
-    if (waitResult != 0) {
-        [asset cancelLoading];
+    NSArray<AVAssetTrack *> *videoTracks = nil;
+    NSArray<AVAssetTrack *> *audioTracks = nil;
+    NSError *loadingError = nil;
+    VCMediaTrackLoadResult result = VCMediaLoadTracks(
+        asset,
+        VCLocalMediaTrackLoadingTimeout,
+        nil,
+        &videoTracks,
+        &audioTracks,
+        &loadingError);
+    if (result == VCMediaTrackLoadResultTimedOut) {
         if (errorOut) {
             *errorOut = VCLocalMediaError(
                 VCLocalMediaImportErrorTrackLoadingTimeout,
@@ -168,10 +153,7 @@ static BOOL VCAssetContainsRecognizableMediaTracks(NSURL *url,
         }
         return NO;
     }
-    if (videoTracks.count > 0 || audioTracks.count > 0) return YES;
-
-    NSError *loadingError = videoError ?: audioError;
-    if (loadingError) {
+    if (result == VCMediaTrackLoadResultFailed) {
         if (errorOut) {
             NSString *message = [NSString stringWithFormat:
                 @"AVFoundation 无法读取所选文件的媒体轨道：%@",
@@ -183,6 +165,16 @@ static BOOL VCAssetContainsRecognizableMediaTracks(NSURL *url,
         }
         return NO;
     }
+    if (requiresVideoTrack && videoTracks.count == 0) {
+        if (errorOut) {
+            *errorOut = VCLocalMediaError(
+                VCLocalMediaImportErrorUnsupportedMedia,
+                @"照片返回的文件不包含可读取的视频轨道，请在照片中下载原视频后重试。",
+                nil);
+        }
+        return NO;
+    }
+    if (videoTracks.count > 0 || audioTracks.count > 0) return YES;
     if (errorOut) {
         *errorOut = VCLocalMediaError(
             VCLocalMediaImportErrorUnsupportedMedia,
@@ -195,6 +187,7 @@ static BOOL VCAssetContainsRecognizableMediaTracks(NSURL *url,
 static NSURL *VCImportLocalMediaURL(NSURL *sourceURL,
                                     NSString *suggestedName,
                                     BOOL stopSecurityScopedAccess,
+                                    BOOL requiresVideoTrack,
                                     NSError **errorOut) {
     if (!sourceURL.isFileURL || sourceURL.path.length == 0) {
         if (errorOut) {
@@ -278,7 +271,9 @@ static NSURL *VCImportLocalMediaURL(NSURL *sourceURL,
     }
 
     NSError *trackLoadingError = nil;
-    if (!VCAssetContainsRecognizableMediaTracks(stagingURL, &trackLoadingError)) {
+    if (!VCAssetContainsRecognizableMediaTracks(stagingURL,
+                                                requiresVideoTrack,
+                                                &trackLoadingError)) {
         [fileManager removeItemAtURL:stagingURL error:nil];
         if (errorOut) *errorOut = trackLoadingError;
         return nil;
@@ -1233,6 +1228,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
                             importedURL = VCImportLocalMediaURL(url,
                                                                provider.suggestedName,
                                                                NO,
+                                                               YES,
                                                                &importError);
                         }
                     }
@@ -1296,6 +1292,7 @@ didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
                 NSURL *importedURL = VCImportLocalMediaURL(url,
                                                            suggestedName,
                                                            stopSecurityAccess,
+                                                           NO,
                                                            &importError);
                 if (importedURL) [importedURLs addObject:importedURL];
                 if (importError) [importErrors addObject:importError];

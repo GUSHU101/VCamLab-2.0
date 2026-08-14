@@ -90,6 +90,7 @@ def validate_preferences() -> None:
     implementation = read_text("VCPreferences.m")
     header = read_text("VCPreferences.h")
     controller = read_text("prefs/VCPRootListController.m")
+    track_loader = read_text("VCMediaTrackLoader.h")
     bundle_makefile = read_text("prefs/Makefile")
     workflow = read_text(".github/workflows/test.yml")
     root = read_plist("prefs/Resources/Root.plist")
@@ -185,13 +186,9 @@ def validate_preferences() -> None:
             "NSFileCoordinator",
             '@"/var/mobile/Media/VirtualCamPro"',
             "NSFileSystemFreeSize",
-            "AVMediaTypeVideo",
-            "AVMediaTypeAudio",
             "VCAssetContainsRecognizableMediaTracks",
-            "loadTracksWithMediaType:AVMediaTypeVideo",
-            "loadTracksWithMediaType:AVMediaTypeAudio",
+            "VCMediaLoadTracks",
             "VCLocalMediaTrackLoadingTimeout",
-            "dispatch_group_wait",
             "VCLocalMediaImportErrorTrackLoadingTimeout",
             "PHPickerConfigurationAssetRepresentationModeCompatible",
             "CFPreferencesSetAppValue(VCLocalMediaPathKey",
@@ -240,6 +237,25 @@ def validate_preferences() -> None:
             '@"maximumLength": @128',
         ),
         "mobile native settings and runtime recovery",
+    )
+    require(
+        track_loader,
+        (
+            "VCMediaTrackLoadResultLoaded",
+            "VCMediaTrackLoadResultFailed",
+            "VCMediaTrackLoadResultTimedOut",
+            "VCMediaTrackLoadResultCancelled",
+            "loadTracksWithMediaType:AVMediaTypeVideo",
+            "loadTracksWithMediaType:AVMediaTypeAudio",
+            "dispatch_group_wait",
+            "NSProcessInfo.processInfo.systemUptime",
+            "[asset cancelLoading]",
+            "VCMediaLoadVideoTrackGeometry",
+            'loadValuesAsynchronouslyForKeys:@[@"preferredTransform", @"naturalSize"]',
+            'statusOfValueForKey:@"preferredTransform"',
+            'statusOfValueForKey:@"naturalSize"',
+        ),
+        "shared asynchronous local-media track loader",
     )
     if "[asset tracksWithMediaType:" in controller or \
        "PHPickerConfigurationAssetRepresentationModeCurrent" in controller:
@@ -468,14 +484,28 @@ def validate_zero_copy_bus() -> None:
             "BOOL tooLate",
             "CMBlockBufferGetDataPointer",
             "VCResolveLocalTrackOrientation",
-            "videoTrack.preferredTransform",
             "trackRotation",
             "trackMirrored",
             "VCLocalMediaCompletionCallback",
             "reachedNaturalEnd",
+            '#import "VCMediaTrackLoader.h"',
+            "VCMediaLoadTracks",
+            "VCMediaTrackLoadResultCancelled",
+            "self.loadingAsset = asset",
+            "[loadingAsset cancelLoading]",
+            "self.preparedAsset = asset",
+            "VCMediaLoadVideoTrackGeometry",
+            "![self isGenerationCurrent:generation]",
+            "self.preparedTrackTransform = preferredTransform",
+            "self.preparedTrackNaturalSize = naturalSize",
+            "self.preparedTrackGeometryReady = geometryReady",
         ),
         "local media producer",
     )
+    if "tracksWithMediaType:" in local:
+        fail("local media playback must await the shared asynchronous track loader")
+    if "videoTrack.preferredTransform" in local or "videoTrack.naturalSize" in local:
+        fail("local media playback must await video-track geometry before access")
     require(
         orientation,
         (
@@ -531,6 +561,19 @@ def validate_zero_copy_bus() -> None:
         ),
         "sender-authoritative network decoder",
     )
+    require(
+        network,
+        (
+            "loadTracksWithMediaType:AVMediaTypeVideo",
+            'loadValuesAsynchronouslyForKeys:@[@"nominalFrameRate"]',
+            'statusOfValueForKey:@"nominalFrameRate"',
+            "item != liveSelf.hlsPlayerItem",
+            "[loadingAsset cancelLoading]",
+        ),
+        "non-blocking HLS track metadata loading",
+    )
+    if "item.tracks" in network or "assetTrack.nominalFrameRate" in network:
+        fail("HLS polling adaptation must not synchronously inspect track metadata")
     if "CGImageSourceCreateThumbnail" in network:
         fail("network MJPEG must not apply a phone-side thumbnail quality/orientation transform")
     if "preferredFPS" in network_header or "maximumPixelDimension" in network_header:
